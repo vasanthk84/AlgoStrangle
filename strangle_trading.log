@@ -368,3 +368,4 @@
 2025-10-25 14:16:13,803 - INFO - TRAILING STOP HIT: NIFTY25OCT26323CE
 2025-10-25 14:16:13,816 - INFO - TRADE CLOSED: NIFTY25OCT26323CE, P&L: Rs.0.40
 2025-10-25 14:16:14,005 - INFO - DAY SUMMARY: Trades=10, Daily P&L=Rs.2.50, CE=Rs.0.40, PE=Rs.2.10, Entry Checks=28
+2025-10-25 19:55:26,001 - ERROR - Authentication failed: HTTPSConnectionPool(host='api.kite.trade', port=443): Max retries exceeded with url: /user/profile (Caused by NameResolutionError("<urllib3.connection.HTTPSConnection object at 0x7f0e7b3ad1f0>: Failed to resolve 'api.kite.trade' ([Errno -5] No address associated with hostname)"))
