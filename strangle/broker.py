@@ -1,5 +1,6 @@
 """
 Broker interface for the Short Strangle Trading System
+FIXED: Backtest get_quote now uses greeks_calculator to price options dynamically.
 """
 
 import logging
@@ -11,6 +12,8 @@ from kiteconnect import KiteConnect
 from .config import Config
 from .models import Direction, MarketData
 from .utils import Utils
+# --- FIX: Import GreeksCalculator for backtesting ---
+from .greeks_calculator import GreeksCalculator
 
 
 class BrokerInterface:
@@ -19,6 +22,13 @@ class BrokerInterface:
         self.backtest_data = backtest_data
         self.current_index = 0
         self.access_token_expiry = None
+
+        # --- FIX: Add greeks_calc for backtest pricing ---
+        self.greeks_calc = GreeksCalculator()
+
+        if self.backtest_data is not None:
+            # Ensure timestamp is datetime
+            self.backtest_data['timestamp'] = pd.to_datetime(self.backtest_data['timestamp'])
 
     def authenticate(self):
         if self.backtest_data is not None:
@@ -56,12 +66,39 @@ class BrokerInterface:
 
     def get_quote(self, symbol: str) -> float:
         if self.backtest_data is not None:
+            # --- FIX: Dynamic Price Calculation for Backtesting ---
             current_row = self.backtest_data.iloc[self.current_index]
-            if symbol.startswith("NIFTY") and symbol.endswith("CE"):
-                return current_row.get('ce_price', 0.0)
-            elif symbol.startswith("NIFTY") and symbol.endswith("PE"):
-                return current_row.get('pe_price', 0.0)
-            return current_row.get('nifty_spot', 0.0)
+            market_data = self.get_market_data() # Get current spot, vix, etc.
+
+            # Try to parse the symbol
+            parsed = Utils.parse_option_symbol(symbol)
+            if parsed:
+                _, strike, option_type = parsed
+
+                # Find the expiry date from the trade (a bit of a hack)
+                # In a real backtester, symbol would contain the full expiry
+                # We assume the strategy only holds one expiry at a time
+                # For simplicity, we just calculate DTE based on a weekly expiry
+
+                current_date = market_data.timestamp.date()
+                days_to_add = (Config.WEEKLY_EXPIRY_DAY - current_date.weekday()) % 7
+                if days_to_add == 0: days_to_add = 7 # Assume next week's
+                expiry = current_date + pd.Timedelta(days=days_to_add)
+
+                dte = self.greeks_calc.get_dte(expiry, current_date)
+
+                price = self.greeks_calc.get_option_price(
+                    spot=market_data.nifty_spot,
+                    strike=strike,
+                    dte=dte,
+                    volatility=market_data.india_vix, # Pass as percentage
+                    option_type=option_type
+                )
+                return price
+            else:
+                # Not an option, maybe NIFTY spot?
+                return market_data.nifty_spot
+
         try:
             quote = self.kite.quote(symbol)
             return quote[symbol]['last_price']
@@ -70,7 +107,8 @@ class BrokerInterface:
             return 0.0
 
     def get_lot_size(self, symbol: str) -> int:
-        return 50
+        # Updated NIFTY lot size to 75
+        return 75
 
     def get_market_data(self) -> MarketData:
         if self.backtest_data is not None:
@@ -83,9 +121,14 @@ class BrokerInterface:
                 nifty_low=row.get('nifty_low', 0.0),
                 india_vix=row.get('india_vix', 0.0),
                 vix_30day_avg=row.get('vix_30day_avg', 0.0),
-                timestamp=pd.to_datetime(row['timestamp'])
+                timestamp=row['timestamp'] # Already a datetime object
             )
-        return MarketData()
+        # Placeholder for live market data
+        return MarketData(
+            nifty_spot=self.get_quote("NIFTY 50"),
+            india_vix=self.get_quote("INDIA VIX")
+            # ... other live data fetches
+        )
 
     def place_order(self, symbol: str, qty: int, direction: Direction, price: float) -> str:
         if self.backtest_data is not None:

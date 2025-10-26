@@ -1,14 +1,28 @@
 """
-Data models for the Short Strangle Trading System
+Enhanced Data Models with Greeks Support
 """
 
 from enum import Enum
 from datetime import datetime
+from typing import Optional
 
 
 class Direction(Enum):
     BUY = "BUY"
     SELL = "SELL"
+
+
+class Greeks:
+    """Option Greeks container"""
+    def __init__(self, delta: float = 0.0, gamma: float = 0.0,
+                 theta: float = 0.0, vega: float = 0.0):
+        self.delta = delta
+        self.gamma = gamma
+        self.theta = theta
+        self.vega = vega
+
+    def __str__(self):
+        return f"Δ={self.delta:.1f} Γ={self.gamma:.4f} Θ={self.theta:.2f} ν={self.vega:.2f}"
 
 
 class MarketData:
@@ -28,30 +42,36 @@ class MarketData:
         self.advance_decline_ratio = kwargs.get('advance_decline_ratio', 0.0)
         self.timestamp = kwargs.get('timestamp', datetime.now())
         self.iv_percentile = kwargs.get('iv_percentile', 50.0)
-        self.atm_iv = kwargs.get('atm_iv', 0.0)
         self.iv_rank = kwargs.get('iv_rank', 50.0)
+        self.atm_iv = kwargs.get('atm_iv', 0.0)
 
 
 class Trade:
-    def __init__(self, trade_id: str, symbol: str, qty: int, direction: Direction, price: float,
-                 timestamp: datetime, option_type: str):
+    def __init__(self, trade_id: str, symbol: str, qty: int, direction: Direction,
+                 price: float, timestamp: datetime, option_type: str,
+                 lot_size: int = 75, strike_price: float = None,
+                 expiry: datetime = None, spot_at_entry: float = 0.0):
         self.trade_id = trade_id
         self.symbol = symbol
-        self.qty = qty
+        self.qty = qty  # Number of lots
+        self.lot_size = lot_size  # NIFTY = 75
         self.direction = direction
         self.entry_price = price
         self.current_price = price
         self.timestamp = timestamp
         self.option_type = option_type
         self.slippage = 0.0
-        self.greeks = None
+        self.greeks: Optional[Greeks] = None
         self.highest_profit = 0.0
         self.trailing_stop_price = None
-        self.strike_price = self._extract_strike_from_symbol(symbol)
+        self.strike_price = strike_price or self._extract_strike_from_symbol(symbol)
+        self.expiry = expiry
+        self.spot_at_entry = spot_at_entry
         self.rolled_from = None
+        self.hedge_protection: Optional[str] = None
 
     def _extract_strike_from_symbol(self, symbol: str) -> float:
-        """Extract strike price from option symbol"""
+        """Extract strike from symbol"""
         try:
             import re
             match = re.search(r'(\d{5,})(CE|PE)$', symbol)
@@ -61,18 +81,65 @@ class Trade:
             pass
         return 0.0
 
-    def update_price(self, price: float):
+    def update_price(self, price: float, greeks: Optional[Greeks] = None):
+        """Update price and greeks"""
         self.current_price = price
+        if greeks:
+            self.greeks = greeks
+
         self.slippage = abs(self.current_price - self.entry_price) / self.entry_price if self.entry_price > 0 else 0.0
         current_pnl = self.get_pnl()
         if current_pnl > self.highest_profit:
             self.highest_profit = current_pnl
 
     def get_pnl(self) -> float:
-        return (self.entry_price - self.current_price) * self.qty * (1 if self.direction == Direction.SELL else -1)
+        """Calculate P&L in Rupees"""
+        premium_diff = self.entry_price - self.current_price
+        total_contracts = self.qty * self.lot_size
+
+        if self.direction == Direction.SELL:
+            pnl = premium_diff * total_contracts
+        else:
+            pnl = -premium_diff * total_contracts
+
+        return pnl
 
     def get_pnl_pct(self) -> float:
-        """Get P&L as percentage of entry premium"""
+        """Get P&L as percentage"""
         if self.entry_price == 0:
             return 0.0
-        return (self.get_pnl() / (self.entry_price * self.qty)) * 100
+
+        premium_diff = self.entry_price - self.current_price
+
+        if self.direction == Direction.SELL:
+            return (premium_diff / self.entry_price) * 100
+        else:
+            return (-premium_diff / self.entry_price) * 100
+
+    def get_entry_value(self) -> float:
+        """Total value at entry"""
+        return self.entry_price * self.qty * self.lot_size
+
+    def get_current_value(self) -> float:
+        """Current total value"""
+        return self.current_price * self.qty * self.lot_size
+
+    def get_loss_multiple(self) -> float:
+        """Get loss as multiple of entry premium (for stop-loss)"""
+        if self.entry_price == 0:
+            return 0.0
+
+        if self.direction == Direction.SELL:
+            # Short: loss when price increases
+            loss = max(0, self.current_price - self.entry_price)
+            return loss / self.entry_price
+        else:
+            # Long: loss when price decreases
+            loss = max(0, self.entry_price - self.current_price)
+            return loss / self.entry_price
+
+    def is_near_atm(self, current_spot: float, threshold_points: int = 100) -> bool:
+        """Check if near ATM"""
+        if self.strike_price == 0:
+            return False
+        return abs(self.strike_price - current_spot) <= threshold_points
