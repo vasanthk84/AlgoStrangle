@@ -209,6 +209,7 @@ class ShortStrangleStrategy:
     def execute_short_strangle_strategy(self) -> bool:
         """
         Execute Short Strangle strategy for range-bound markets
+        FIXED: Works for both backtest and live trading modes
         Returns True if executed successfully
         """
         # Determine target delta based on VIX
@@ -231,15 +232,45 @@ class ShortStrangleStrategy:
 
         ce_strike, pe_strike, ce_delta, pe_delta = strikes_result
 
-        # Use actual symbols and prices from market data
-        ce_symbol = self.market_data.ce_symbol
-        pe_symbol = self.market_data.pe_symbol
+        # ═══════════════════════════════════════════════════════════════
+        # FIX: Handle BOTH backtest and live trading modes
+        # ═══════════════════════════════════════════════════════════════
 
-        if not ce_symbol or not pe_symbol:
-            logging.error("Missing symbols in market data")
-            return False
+        if self.broker.backtest_data is not None:
+            # BACKTEST MODE: Use symbols from market data
+            ce_symbol = self.market_data.ce_symbol
+            pe_symbol = self.market_data.pe_symbol
 
+            if not ce_symbol or not pe_symbol:
+                logging.error("Missing symbols in backtest data")
+                return False
+
+        else:
+            # LIVE/PAPER TRADING MODE: Find symbols using broker
+            logging.info(f"Finding live option symbols for CE={ce_strike}, PE={pe_strike}, Expiry={expiry}")
+
+            # Find CE symbol
+            ce_instrument = self.broker.find_live_option_symbol(ce_strike, "CE", expiry)
+            if ce_instrument is None:
+                logging.error(f"Could not find CE option for strike {ce_strike}")
+                return False
+
+            # Find PE symbol
+            pe_instrument = self.broker.find_live_option_symbol(pe_strike, "PE", expiry)
+            if pe_instrument is None:
+                logging.error(f"Could not find PE option for strike {pe_strike}")
+                return False
+
+            # Format symbols with NFO: prefix for live trading
+            ce_symbol = f"NFO:{ce_instrument['tradingsymbol']}"
+            pe_symbol = f"NFO:{pe_instrument['tradingsymbol']}"
+
+            logging.info(f"✓ Found CE: {ce_symbol}, PE: {pe_symbol}")
+
+        # ═══════════════════════════════════════════════════════════════
         # Get REAL market prices
+        # ═══════════════════════════════════════════════════════════════
+
         ce_price = self.broker.get_quote(ce_symbol)
         pe_price = self.broker.get_quote(pe_symbol)
 
@@ -262,6 +293,10 @@ class ShortStrangleStrategy:
         # Place orders
         ce_order_id = self.broker.place_order(ce_symbol, qty_lots, Direction.SELL, ce_price)
         pe_order_id = self.broker.place_order(pe_symbol, qty_lots, Direction.SELL, pe_price)
+
+        if not ce_order_id or not pe_order_id:
+            logging.error("Order placement failed")
+            return False
 
         # Create trades
         ce_trade = Trade(
@@ -290,16 +325,28 @@ class ShortStrangleStrategy:
             lots=qty_lots
         )
 
+        # ═══════════════════════════════════════════════════════════════
+        # ENHANCED NOTIFICATION
+        # ═══════════════════════════════════════════════════════════════
+        mode = "PAPER" if Config.PAPER_TRADING else "LIVE"
+
+        self.notifier.notify_entry(
+            strategy_name="Short Strangle",
+            ce_strike=ce_strike,
+            pe_strike=pe_strike,
+            ce_price=ce_price,
+            pe_price=pe_price,
+            combined_premium=combined_premium,
+            qty=qty_lots,
+            spot=self.market_data.nifty_spot,
+            vix=self.market_data.india_vix,
+            mode=mode
+        )
+
         reason = f"SHORT STRANGLE: CE={ce_strike} (Δ{ce_delta:.1f}), PE={pe_strike} (Δ{pe_delta:.1f})"
         self.entry_logger.log_decision(
             self.market_data, approved='YES', reason=reason,
             lots=qty_lots, combined_premium=combined_premium
-        )
-
-        self.notifier.send_alert(
-            f"ENTRY: Short Strangle @ {self.market_data.nifty_spot:.2f}. "
-            f"CE {ce_strike}, PE {pe_strike}. Premium: {combined_premium:.2f}",
-            "SUCCESS"
         )
 
         self.strategy_usage['short_strangle'] += 1
@@ -315,12 +362,21 @@ class ShortStrangleStrategy:
         if not self.entry_allowed_today:
             return
 
-        current_time = self.market_data.timestamp.time()
-        entry_start = dt_time.fromisoformat(Config.ENTRY_START)
-        entry_stop = dt_time.fromisoformat(Config.ENTRY_STOP)
+        # # ADD THIS CHECK:
+        # if not Config.DISABLE_TIME_CHECKS:
+        #     current_time = self.market_data.timestamp.time()
+        #     entry_start = dt_time.fromisoformat(Config.ENTRY_START)
+        #     entry_stop = dt_time.fromisoformat(Config.ENTRY_STOP)
+        #
+        #     if not (entry_start <= current_time <= entry_stop):
+        #         return
 
-        if not (entry_start <= current_time <= entry_stop):
-            return
+        # current_time = self.market_data.timestamp.time()
+        # entry_start = dt_time.fromisoformat(Config.ENTRY_START)
+        # entry_stop = dt_time.fromisoformat(Config.ENTRY_STOP)
+        #
+        # if not (entry_start <= current_time <= entry_stop):
+        #     return
 
         # Get market regime
         regime = self.get_trend_bias(Config.TREND_DETECTION_PERIOD)
@@ -494,7 +550,28 @@ class ShortStrangleStrategy:
 
             if pnl_pct is not None and pnl_pct >= target_pnl_pct:
                 logging.info(f"PROFIT TARGET HIT: {pair_id} ({pnl_pct:.1f}%). Closing.")
+                # Get pair details for notification
+                meta = self.trade_manager.active_pairs.get(pair_id)
+                if meta:
+                    entry_combined = meta['entry_combined']
+                    current_combined = self.trade_manager.get_pair_current_combined(pair_id)
+
+                    # Calculate P&L
+                    pnl_points = entry_combined - current_combined if current_combined else 0
+                    pnl_rupees = pnl_points * meta['lots'] * 75
+
+                    # ═══════════════════════════════════════════════════════════
+                    # ENHANCED NOTIFICATION
+                    # ═══════════════════════════════════════════════════════════
+                    self.notifier.notify_profit_target(
+                        pair_id=pair_id,
+                        entry_combined=entry_combined,
+                        current_combined=current_combined or 0,
+                        pnl=pnl_rupees,
+                        pnl_pct=pnl_pct
+                    )
                 self.trade_manager.close_pair(pair_id, self.market_data.timestamp, "PROFIT_TARGET")
+
                 self.notifier.send_alert(
                     f"EXIT: Profit Target Hit for {pair_id}. P&L: Rs.{self.trade_manager.daily_pnl:,.2f}",
                     "SUCCESS"

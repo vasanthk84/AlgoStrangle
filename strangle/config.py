@@ -37,6 +37,8 @@ class Config:
     # Trading Mode
     PAPER_TRADING = True
 
+    DISABLE_TIME_CHECKS = True
+
     # Capital Management
     CAPITAL = 1000000
     MAX_RISK_PER_TRADE_PCT = 0.02
@@ -85,9 +87,11 @@ class Config:
     DB_FILE = "trades_database.db" # Keep DB in root
     BACKTEST_CACHE_DIR = "back_test_cache"
 
+    DRY_RUN_MODE = True  # Set to False for actual trading
+
     # Notifications
-    TELEGRAM_BOT_TOKEN = "your_telegram_bot_token"
-    TELEGRAM_CHAT_ID = "your_chat_id"
+    TELEGRAM_BOT_TOKEN = "7668822476:AAEeSzWdt7DgzOs3Fsbz5_oZpPL8xoUpLH8"
+    TELEGRAM_CHAT_ID = "7745188241"
     ACCESS_TOKEN_FILE = "access_token.txt"
 
     # Expiry

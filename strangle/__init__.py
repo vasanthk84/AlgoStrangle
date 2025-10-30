@@ -10,7 +10,7 @@ from .notifier import NotificationManager
 from .broker import BrokerInterface
 from .trade_manager import TradeManager
 from .strategy import ShortStrangleStrategy
-from .dashboard import ConsoleDashboard
+from .dashboard import ConsoleDashboard, ConsoleDashboardMinimal
 
 __all__ = [
     'Config',
@@ -24,4 +24,5 @@ __all__ = [
     'TradeManager',
     'ShortStrangleStrategy',
     'ConsoleDashboard',
+    'ConsoleDashboardMinimal',
 ]
