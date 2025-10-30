@@ -262,7 +262,7 @@ class ConsoleDashboard:
         output_lines.append(f"{Fore.CYAN}{'─' * 110}{Style.RESET_ALL}")
         output_lines.append(f"{Fore.YELLOW}Press Ctrl+C to stop gracefully{Style.RESET_ALL}")
 
-         print('\n'.join(output_lines), flush=True)
+        print('\n'.join(output_lines), flush=True)
 
         self.last_update = current_time
         self.is_first_render = False
