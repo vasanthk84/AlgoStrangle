@@ -236,6 +236,56 @@ def backtest_main(broker: BrokerInterface, start_date: str, end_date: str, force
     print(f"\n{Fore.GREEN}Runtime Entry Decision Log: {Config.ENTRY_LOG_FILE}{Style.RESET_ALL}")
     strategy.entry_logger.print_recent(days=20)
 
+    """
+    Add this code to your run.py at the END of backtest_main() function
+    Right before the final "Backtest completed successfully!" message
+    """
+
+    # Add this RIGHT BEFORE the final success message in backtest_main():
+
+    # ═══════════════════════════════════════════════════════════
+    # STRATEGY USAGE SUMMARY (NEW)
+    # ═══════════════════════════════════════════════════════════
+    print(f"\n{'=' * 80}")
+    print(f"{Fore.CYAN}STRATEGY DEPLOYMENT SUMMARY{Style.RESET_ALL}")
+    print(f"{'=' * 80}")
+
+    # Print strategy usage from the strategy object
+    strategy.print_strategy_usage_summary()
+
+    # Calculate strategy effectiveness
+    total_strategies_used = sum(strategy.strategy_usage.values())
+    if total_strategies_used > 0:
+        strategy_data = []
+        for strat_name, count in strategy.strategy_usage.items():
+            if count > 0 and strat_name != 'skipped':
+                pct = (count / total_strategies_used) * 100
+                strategy_data.append([
+                    strat_name.replace('_', ' ').title(),
+                    count,
+                    f"{pct:.1f}%"
+                ])
+
+        if strategy_data:
+            print(tabulate(strategy_data, headers=["Strategy", "Times Used", "% of Total"], tablefmt="grid"))
+
+        # Calculate adaptive rate
+        active_strategies = sum(v for k, v in strategy.strategy_usage.items() if k != 'skipped')
+        skipped = strategy.strategy_usage.get('skipped', 0)
+        total_days = total_strategies_used
+
+        print(f"\n{Fore.CYAN}Adaptive System Performance:{Style.RESET_ALL}")
+        print(f"  Trading Days: {total_days}")
+        print(f"  Strategies Deployed: {active_strategies} ({active_strategies / total_days * 100:.1f}%)")
+        print(f"  Days Skipped: {skipped} ({skipped / total_days * 100:.1f}%)")
+        print(
+            f"  Unique Strategies Used: {len([k for k, v in strategy.strategy_usage.items() if v > 0 and k != 'skipped'])}")
+
+    print(f"{'=' * 80}")
+
+    # Existing code continues...
+    print(f"\n{Fore.GREEN}Backtest completed successfully!{Style.RESET_ALL}\n")
+    db.close()
 
     print(f"\n{Fore.GREEN}Backtest completed successfully!{Style.RESET_ALL}\n")
     db.close()

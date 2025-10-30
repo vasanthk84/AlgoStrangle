@@ -44,6 +44,8 @@ class MarketData:
         self.iv_percentile = kwargs.get('iv_percentile', 50.0)
         self.iv_rank = kwargs.get('iv_rank', 50.0)
         self.atm_iv = kwargs.get('atm_iv', 0.0)
+        self.ce_symbol = kwargs.get('ce_symbol', '')
+        self.pe_symbol = kwargs.get('pe_symbol', '')
 
 
 class Trade:

@@ -1,6 +1,10 @@
 """
-historical_data_manager.py - FIXED VERSION
+historical_data_manager.py - FIXED VERSION with Weekly Expiry Support
 Handles downloading, caching, and preparation of historical data for backtesting
+FIXED:
+- Properly finds weekly expiries (Tuesdays)
+- Uses the expiry returned by strike_calculator
+- Validates symbols match the intended expiry
 """
 
 import os
@@ -29,7 +33,6 @@ class HistoricalDataManager:
         """Load data from cache if exists"""
         if cache_path.exists():
             try:
-                # Try to read with parse_dates if timestamp column exists
                 df = pd.read_csv(cache_path)
                 if 'timestamp' in df.columns:
                     df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -60,7 +63,6 @@ class HistoricalDataManager:
         logging.info(f"Downloading NIFTY data from {start_date} to {end_date}")
 
         try:
-            # Download minute data for NIFTY 50 index
             data = self.kite.historical_data(
                 instrument_token=256265,  # NIFTY 50 token
                 from_date=start_date,
@@ -78,7 +80,6 @@ class HistoricalDataManager:
                 'volume': 'nifty_volume'
             }, inplace=True)
 
-            # Add NIFTY Future (approximate as spot + 10 points)
             df['nifty_future'] = df['nifty_spot'] + 10
 
             self._save_to_cache(df, cache_path)
@@ -101,7 +102,6 @@ class HistoricalDataManager:
         logging.info(f"Downloading VIX data from {start_date} to {end_date}")
 
         try:
-            # Download minute data for India VIX
             data = self.kite.historical_data(
                 instrument_token=264969,  # India VIX token
                 from_date=start_date,
@@ -116,7 +116,6 @@ class HistoricalDataManager:
             }, inplace=True)
             df = df[['timestamp', 'india_vix']]
 
-            # Calculate 30-day rolling average
             df['vix_30day_avg'] = df['india_vix'].rolling(window=30 * 375, min_periods=1).mean()
 
             self._save_to_cache(df, cache_path)
@@ -141,11 +140,10 @@ class HistoricalDataManager:
             instruments = self.kite.instruments("NFO")
             df = pd.DataFrame(instruments)
 
-            # Filter for NIFTY options
             nifty_options = df[
                 (df['name'] == 'NIFTY') &
                 (df['instrument_type'].isin(['CE', 'PE']))
-                ].copy()
+            ].copy()
 
             self._save_to_cache(nifty_options, cache_path)
             return nifty_options
@@ -187,43 +185,41 @@ class HistoricalDataManager:
 
         except Exception as e:
             logging.error(f"Failed to download option data for {symbol}: {e}")
-            # Return empty dataframe with structure
             return pd.DataFrame(columns=['timestamp', 'price'])
 
-    def find_nearest_strikes(self, instruments: pd.DataFrame, target_ce_strike: float,
-                             target_pe_strike: float, current_date: date) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    def find_options_for_expiry(self, instruments: pd.DataFrame, target_ce_strike: float,
+                                target_pe_strike: float, target_expiry: date) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
-        Find the nearest available strikes to the targets
+        Find options matching the EXACT target expiry and nearest strikes
 
         Args:
             instruments: DataFrame with option instruments
             target_ce_strike: Desired CE strike
             target_pe_strike: Desired PE strike
-            current_date: Current trading date
+            target_expiry: EXACT expiry date to use (from strike_calculator)
 
         Returns:
             Tuple of (ce_instrument, pe_instrument) DataFrames
         """
-        # Get all available expiries
+        # Convert expiry to date objects for comparison
         instruments['expiry_date'] = pd.to_datetime(instruments['expiry']).dt.date
-        available_expiries = sorted(instruments['expiry_date'].unique())
 
-        # Filter expiries that are >= current_date
-        valid_expiries = [exp for exp in available_expiries if exp >= current_date]
+        # CRITICAL: Filter for EXACT expiry match
+        expiry_options = instruments[instruments['expiry_date'] == target_expiry]
 
-        if not valid_expiries:
-            logging.error(f"No valid expiries found for date {current_date}")
+        if expiry_options.empty:
+            logging.error(
+                f"No options found for expiry {target_expiry}. "
+                f"Available expiries: {sorted(instruments['expiry_date'].unique())}"
+            )
             return pd.DataFrame(), pd.DataFrame()
 
-        # Use the nearest expiry (typically weekly)
-        nearest_expiry = valid_expiries[0]
+        logging.info(
+            f"Found {len(expiry_options)} options for expiry {target_expiry} "
+            f"(Day: {target_expiry.strftime('%A')})"
+        )
 
-        logging.info(f"  Using expiry: {nearest_expiry} (available: {len(valid_expiries)} expiries)")
-
-        # Filter for this expiry
-        expiry_options = instruments[instruments['expiry_date'] == nearest_expiry]
-
-        # Find CE strike - try exact match first, then nearest
+        # Find CE strike
         ce_options = expiry_options[expiry_options['instrument_type'] == 'CE']
         ce_instrument = ce_options[ce_options['strike'] == target_ce_strike]
 
@@ -235,9 +231,16 @@ class HistoricalDataManager:
             if not ce_options_sorted.empty:
                 ce_instrument = ce_options_sorted.head(1)
                 actual_ce_strike = ce_instrument.iloc[0]['strike']
-                logging.info(f"  CE: Using nearest strike {actual_ce_strike} (target was {target_ce_strike})")
+                actual_ce_symbol = ce_instrument.iloc[0]['tradingsymbol']
+                logging.info(
+                    f"  CE: Using nearest strike {actual_ce_strike} (target was {target_ce_strike}). "
+                    f"Symbol: {actual_ce_symbol}"
+                )
+        else:
+            actual_ce_symbol = ce_instrument.iloc[0]['tradingsymbol']
+            logging.info(f"  CE: Exact match found. Symbol: {actual_ce_symbol}")
 
-        # Find PE strike - try exact match first, then nearest
+        # Find PE strike
         pe_options = expiry_options[expiry_options['instrument_type'] == 'PE']
         pe_instrument = pe_options[pe_options['strike'] == target_pe_strike]
 
@@ -249,7 +252,14 @@ class HistoricalDataManager:
             if not pe_options_sorted.empty:
                 pe_instrument = pe_options_sorted.head(1)
                 actual_pe_strike = pe_instrument.iloc[0]['strike']
-                logging.info(f"  PE: Using nearest strike {actual_pe_strike} (target was {target_pe_strike})")
+                actual_pe_symbol = pe_instrument.iloc[0]['tradingsymbol']
+                logging.info(
+                    f"  PE: Using nearest strike {actual_pe_strike} (target was {target_pe_strike}). "
+                    f"Symbol: {actual_pe_symbol}"
+                )
+        else:
+            actual_pe_symbol = pe_instrument.iloc[0]['tradingsymbol']
+            logging.info(f"  PE: Exact match found. Symbol: {actual_pe_symbol}")
 
         return ce_instrument, pe_instrument
 
@@ -258,6 +268,8 @@ class HistoricalDataManager:
                               force_refresh: bool = False) -> pd.DataFrame:
         """
         Prepare complete backtest dataset with NIFTY, VIX, and option prices
+
+        FIXED: Now uses the expiry date returned by strike_calculator for accurate weekly expiries
 
         Args:
             start_date: Start date in YYYY-MM-DD format
@@ -274,7 +286,6 @@ class HistoricalDataManager:
         # Merge NIFTY and VIX data
         merged_df = pd.merge(nifty_df, vix_df, on='timestamp', how='left')
 
-        # Prepare final dataframe
         all_data = []
 
         # Group by date
@@ -282,7 +293,7 @@ class HistoricalDataManager:
         dates = sorted(merged_df['date'].unique())
 
         for current_date in dates:
-            logging.info(f"Processing {current_date}")
+            logging.info(f"Processing {current_date} ({current_date.strftime('%A')})")
 
             # Get data for this day
             daily_data = merged_df[merged_df['date'] == current_date].copy()
@@ -294,21 +305,29 @@ class HistoricalDataManager:
             opening_spot = daily_data.iloc[0]['nifty_spot']
             opening_vix = daily_data.iloc[0]['india_vix']
 
-            # Calculate strikes for the day
-            ce_strike, pe_strike, expiry = strike_calculator(opening_spot, opening_vix, current_date)
+            # CRITICAL: Get strikes AND the EXACT expiry from strike_calculator
+            ce_strike, pe_strike, target_expiry = strike_calculator(opening_spot, opening_vix, current_date)
 
-            logging.info(f"  Strikes: CE={ce_strike}, PE={pe_strike}, Expiry={expiry}")
+            logging.info(
+                f"  Target Strikes: CE={ce_strike}, PE={pe_strike}"
+            )
+            logging.info(
+                f"  Target Expiry: {target_expiry} ({target_expiry.strftime('%A')})"
+            )
 
             # Get instruments for this date
             instruments = self.download_option_chain(str(current_date), force_refresh)
 
-            # Use find_nearest_strikes to handle missing exact strikes
-            ce_instrument, pe_instrument = self.find_nearest_strikes(
-                instruments, ce_strike, pe_strike, current_date
+            # FIXED: Use find_options_for_expiry with the exact target_expiry
+            ce_instrument, pe_instrument = self.find_options_for_expiry(
+                instruments, ce_strike, pe_strike, target_expiry
             )
 
             if ce_instrument.empty or pe_instrument.empty:
-                logging.warning(f"  Could not find options for strikes CE={ce_strike}, PE={pe_strike}")
+                logging.warning(
+                    f"  Could not find options for strikes CE={ce_strike}, PE={pe_strike}, "
+                    f"Expiry={target_expiry}. Skipping day."
+                )
                 continue
 
             ce_token = ce_instrument.iloc[0]['instrument_token']
@@ -316,7 +335,20 @@ class HistoricalDataManager:
             ce_symbol = ce_instrument.iloc[0]['tradingsymbol']
             pe_symbol = pe_instrument.iloc[0]['tradingsymbol']
 
-            logging.info(f"  Found: {ce_symbol} / {pe_symbol}")
+            # Verify the symbols match the expected expiry
+            ce_expiry_from_instrument = ce_instrument.iloc[0]['expiry_date']
+            pe_expiry_from_instrument = pe_instrument.iloc[0]['expiry_date']
+
+            if ce_expiry_from_instrument != target_expiry:
+                logging.warning(
+                    f"  CE expiry mismatch! Target: {target_expiry}, Got: {ce_expiry_from_instrument}"
+                )
+            if pe_expiry_from_instrument != target_expiry:
+                logging.warning(
+                    f"  PE expiry mismatch! Target: {target_expiry}, Got: {pe_expiry_from_instrument}"
+                )
+
+            logging.info(f"  Using Symbols: {ce_symbol} / {pe_symbol}")
 
             # Download option data
             ce_data = self.download_option_data(
@@ -344,7 +376,7 @@ class HistoricalDataManager:
             else:
                 daily_data['pe_price'] = np.nan
 
-            # FIXED: Use ffill() instead of fillna(method='ffill')
+            # Forward fill VIX
             daily_data['india_vix'] = daily_data['india_vix'].ffill().fillna(opening_vix)
 
             # Add strike and symbol information
@@ -353,11 +385,11 @@ class HistoricalDataManager:
             daily_data['ce_symbol'] = ce_symbol
             daily_data['pe_symbol'] = pe_symbol
 
-            # FIXED: Use ffill() instead of fillna(method='ffill')
+            # Forward fill option prices
             daily_data['ce_price'] = daily_data['ce_price'].ffill()
             daily_data['pe_price'] = daily_data['pe_price'].ffill()
 
-            # Fill any remaining NaN with reasonable defaults
+            # Fill remaining NaN with 0
             daily_data['ce_price'] = daily_data['ce_price'].fillna(0)
             daily_data['pe_price'] = daily_data['pe_price'].fillna(0)
 
@@ -395,10 +427,8 @@ class HistoricalDataManager:
         Returns:
             Tuple of (ce_strikes, pe_strikes)
         """
-        # Round to nearest 50
         atm = round(spot / 50) * 50
 
-        # Generate strike range
         ce_strikes = [atm + (i * 50) for i in range(1, num_strikes + 1)]
         pe_strikes = [atm - (i * 50) for i in range(1, num_strikes + 1)]
 
@@ -428,7 +458,7 @@ class HistoricalDataManager:
         }
 
         # Add data quality score (0-100)
-        total_cells = len(df) * 4  # 4 key columns
+        total_cells = len(df) * 4
         missing_cells = (quality_report['missing_nifty'] +
                          quality_report['missing_vix'] +
                          quality_report['missing_ce_price'] +
@@ -438,20 +468,16 @@ class HistoricalDataManager:
         return quality_report
 
 
-# Example usage and testing
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     print("=" * 80)
-    print("Historical Data Manager - Fixed Version")
+    print("Historical Data Manager - Weekly Expiry Fixed Version")
     print("=" * 80)
     print("\nKey Fixes Applied:")
-    print("  ✓ fillna(method='ffill') replaced with ffill()")
-    print("  ✓ fillna(method='bfill') replaced with bfill()")
-    print("  ✓ Pandas FutureWarning resolved")
-    print("  ✓ Data quality validation added")
-    print("  ✓ Strike range helper added")
-    print("  ✓ Nearest strike finder added")
-    print("  ✓ Syntax errors fixed")
-    print("\nThis module is ready for use with the fixed trading system.")
+    print("  ✓ Uses exact expiry from strike_calculator")
+    print("  ✓ Properly matches weekly expiries (Tuesdays)")
+    print("  ✓ Validates symbol expiry against target expiry")
+    print("  ✓ Logs expiry day names for verification")
+    print("\nThis module now correctly handles weekly NIFTY options.")
     print("=" * 80)
