@@ -15,10 +15,7 @@ from colorama import Fore, Style
 from tabulate import tabulate
 import os
 import shutil
-from colorama import Fore, Style
-from datetime import datetime
 from typing import Set
-from .strangle.utils import Utils
 
 from historical_data_manager import HistoricalDataManager
 from backtest_analyzer import BacktestAnalyzer
