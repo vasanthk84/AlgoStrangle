@@ -17,3 +17,12 @@ build/
 .idea/
 .vscode/
 access_token.txt
+
+# Environment variables and secrets
+.env
+.env.local
+.env.*.local
+*.key
+*.secret
+*_token.txt
+*_secret.txt
