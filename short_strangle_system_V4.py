@@ -1,9 +1,34 @@
 """
-short_strangle_system_V4_PRODUCTION.py - FIXED VERSION
+short_strangle_system_V4_PRODUCTION.py - LEGACY FILE (DEPRECATED)
+
+⚠️ WARNING: This is a legacy file kept for reference only.
+⚠️ Use run.py instead, which has the latest features and security updates.
+
 Enhanced Short Strangle NIFTY Options Trading System with Production-Quality Backtesting
+
+SECURITY NOTE: This file contains hard-coded credentials.
+DO NOT USE THIS FILE. Use run.py with environment variables instead.
 """
 
 import sys
+import os
+
+# Immediately warn and exit
+print("\n" + "="*80)
+print("⚠️  WARNING: This is a LEGACY file with hard-coded credentials")
+print("="*80)
+print("\nThis file is DEPRECATED and should not be used.")
+print("Please use run.py instead:")
+print("  python run.py")
+print("\nFor security, set environment variables for credentials:")
+print("  export KITE_API_KEY='your_key'")
+print("  export KITE_API_SECRET='your_secret'")
+print("\nSee docs/environment_setup.md for details.")
+print("="*80 + "\n")
+sys.exit(1)
+
+# Legacy code below (NOT EXECUTED due to sys.exit above)
+
 import time
 import logging
 from datetime import datetime, date, time as dt_time
@@ -29,8 +54,9 @@ class Direction(Enum):
 
 
 class Config:
-    API_KEY = "qdss2yswc2iuen3j"
-    API_SECRET = "q9cfy774cgt8z0exp0tlat4rntj7huqs"
+    # DEPRECATED: Hard-coded credentials (DO NOT USE)
+    API_KEY = "DEPRECATED_USE_ENV_VARS"
+    API_SECRET = "DEPRECATED_USE_ENV_VARS"
     PAPER_TRADING = True
     CAPITAL = 1000000
     BASE_LOTS = 50

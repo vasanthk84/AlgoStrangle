@@ -278,8 +278,14 @@ def main():
 ╚═══════════════════════════════════════════════════════════════════════════════╝
 """)
     
-    # Configuration (use same values from your config.py)
-    API_KEY = "qdss2yswc2iuen3j"
+    # Configuration - load from environment
+    import os
+    API_KEY = os.getenv('KITE_API_KEY', '')
+    if not API_KEY:
+        print("\n❌ Error: KITE_API_KEY environment variable not set")
+        print("Set it with: export KITE_API_KEY='your_key_here'")
+        return
+    
     ACCESS_TOKEN_FILE = "access_token.txt"
     OUTPUT_FILE = "manual_trades.csv"
     
