@@ -16,6 +16,10 @@ from .broker import BrokerInterface
 from .db import DatabaseManager
 from .notifier import NotificationManager
 from .risk_policy import PortfolioRiskManager, RiskAction
+from .utils import Utils
+
+# Default lot size for NIFTY options
+DEFAULT_LOT_SIZE = 75
 
 
 class TradeManager:
@@ -584,14 +588,13 @@ class TradeManager:
         
         # Calculate hedge size (simplified)
         target_delta_change = target_delta - net_delta_before
-        hedge_lots = max(1, int(abs(target_delta_change) / (Config.HEDGE_DELTA_OFFSET * 75)))
+        hedge_lots = max(1, int(abs(target_delta_change) / (Config.HEDGE_DELTA_OFFSET * DEFAULT_LOT_SIZE)))
         
         # Find hedge symbol and price
         try:
             expiry = self._get_nearest_expiry(market_data.timestamp)
             
             if self.broker.backtest_data is not None:
-                from .utils import Utils
                 hedge_symbol = Utils.prepare_option_symbol(hedge_strike, hedge_option_type, expiry)
                 hedge_price = self.broker.get_quote(hedge_symbol)
             else:
@@ -635,7 +638,7 @@ class TradeManager:
             self.add_trade(hedge_trade)
             
             # Calculate new net delta (approximate)
-            hedge_delta = Config.HEDGE_DELTA_OFFSET * delta_sign * hedge_lots * 75
+            hedge_delta = Config.HEDGE_DELTA_OFFSET * delta_sign * hedge_lots * DEFAULT_LOT_SIZE
             net_delta_after = net_delta_before + hedge_delta
             
             # Send notification
@@ -688,7 +691,6 @@ class TradeManager:
         
         expiry = current + timedelta(days=days_to_add)
         
-        from .utils import Utils
         while Utils.is_holiday(expiry):
             expiry += timedelta(days=1)
         

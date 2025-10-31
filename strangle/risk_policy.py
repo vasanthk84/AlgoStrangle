@@ -14,6 +14,9 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass
 from enum import Enum
 
+# Import Direction at module level to avoid repeated imports
+from .models import Direction
+
 
 @dataclass
 class PortfolioState:
@@ -101,8 +104,6 @@ class PortfolioRiskManager:
         Returns:
             Updated PortfolioState
         """
-        from .models import Direction
-
         # Reset state
         self.portfolio_state.net_delta = 0.0
         self.portfolio_state.net_gamma = 0.0
