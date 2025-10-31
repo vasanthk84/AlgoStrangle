@@ -27,9 +27,9 @@ class Config:
     ENTRY_LOG_FILE = os.path.join(LOG_DIR_CSV, f"entry_decisions_{LOG_TIMESTAMP}.csv")
     AUDIT_FILE = os.path.join(LOG_DIR_AUDIT, f"audit_trail_{LOG_TIMESTAMP}.txt")
 
-    # API Configuration
-    API_KEY = "qdss2yswc2iuen3j"
-    API_SECRET = "q9cfy774cgt8z0exp0tlat4rntj7huqs"
+    # API Configuration (moved to environment variables for security)
+    API_KEY = os.getenv("KITE_API_KEY", "")
+    API_SECRET = os.getenv("KITE_API_SECRET", "")
 
     # Trading Mode
     PAPER_TRADING = True
@@ -153,10 +153,46 @@ class Config:
     TICK_SKIP_INTERVAL = 5
     DRY_RUN_MODE = True
 
-    # Notifications
-    TELEGRAM_BOT_TOKEN = "7668822476:AAEeSzWdt7DgzOs3Fsbz5_oZpPL8xoUpLH8"
-    TELEGRAM_CHAT_ID = "7745188241"
+    # Notifications (moved to environment variables for security)
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
     ACCESS_TOKEN_FILE = "access_token.txt"
+
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 PORTFOLIO RISK MANAGEMENT
+    # ═══════════════════════════════════════════════════════════════
+    
+    # Daily loss kill-switch
+    DAILY_MAX_LOSS_PCT = 0.015  # 1.5% of capital
+    
+    # Delta bands for portfolio hedging
+    DELTA_BAND_BASE = 15.0  # Base delta band (±15 deltas)
+    
+    # VIX-scaled delta bands (tighter in higher VIX)
+    DELTA_BAND_TIGHT_VIX = {
+        15.0: 15.0,  # VIX < 15: ±15 deltas
+        20.0: 12.0,  # VIX < 20: ±12 deltas
+        30.0: 10.0,  # VIX < 30: ±10 deltas
+        999.0: 8.0   # VIX >= 30: ±8 deltas
+    }
+    
+    # VIX shock thresholds
+    VIX_SHOCK_ABS = 4.0  # Absolute VIX move (pts)
+    VIX_SHOCK_ROC_PCT = 15.0  # VIX rate of change (%)
+    
+    # Short vega reduction on VIX shock
+    SHORT_VEGA_REDUCTION_PCT = 0.4  # Reduce by 40%
+    
+    # Cooldown after adjustments
+    ADJUSTMENT_COOLDOWN_SEC = 900  # 15 minutes
+    
+    # Hedge preferences
+    HEDGE_PREFERRED = "OPTIONS"  # OPTIONS or FUT
+    HEDGE_DELTA_OFFSET = 35.0  # Target delta for hedge options (~35 delta)
+    
+    # Wing parameters for converting to defined risk
+    WING_SPREAD_WIDTH = 200.0  # Points away from short strike
+    WING_MAX_COST_PER_LOT = 1000.0  # Max ₹1,000 per lot for wings
 
     # Expiry
     WEEKLY_EXPIRY_DAY = 1  # Tuesday
@@ -164,3 +200,28 @@ class Config:
     # Legacy Params (kept for backward compatibility)
     OTM_DISTANCE_NORMAL = 400
     OTM_DISTANCE_HIGH_VIX = 450
+    
+    # ═══════════════════════════════════════════════════════════════
+    # Security warnings
+    # ═══════════════════════════════════════════════════════════════
+    @classmethod
+    def validate_secrets(cls):
+        """Validate that secrets are loaded from environment"""
+        warnings = []
+        
+        if not cls.API_KEY:
+            warnings.append("⚠️ KITE_API_KEY not set in environment")
+        if not cls.API_SECRET:
+            warnings.append("⚠️ KITE_API_SECRET not set in environment")
+        if not cls.TELEGRAM_BOT_TOKEN:
+            warnings.append("⚠️ TELEGRAM_BOT_TOKEN not set in environment")
+        if not cls.TELEGRAM_CHAT_ID:
+            warnings.append("⚠️ TELEGRAM_CHAT_ID not set in environment")
+        
+        if warnings:
+            import logging
+            for warning in warnings:
+                logging.warning(warning)
+            logging.warning("Set environment variables or use a .env file for secrets")
+        
+        return len(warnings) == 0
