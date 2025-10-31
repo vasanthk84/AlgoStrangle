@@ -1,7 +1,8 @@
 """
-Trade Manager - ALL FIXES APPLIED
+Trade Manager - ALL FIXES APPLIED + RISK MANAGEMENT
 ✅ Fix #1: P&L double-counting fixed
 ✅ Fix #2: Transaction costs included
+🆕 Portfolio risk management integrated
 """
 
 import logging
@@ -15,6 +16,7 @@ from .models import MarketData, Trade, Direction
 from .broker import BrokerInterface
 from .db import DatabaseManager
 from .notifier import NotificationManager
+from .risk_policy import PortfolioRiskManager, RiskThresholds, RiskAction
 
 
 class TradeManager:
@@ -43,6 +45,24 @@ class TradeManager:
         # ✅ NEW: Track transaction costs separately
         self.total_transaction_costs = 0.0
         self.daily_transaction_costs = 0.0
+
+        # 🆕 PORTFOLIO RISK MANAGEMENT
+        thresholds = RiskThresholds(
+            daily_max_loss_pct=Config.DAILY_MAX_LOSS_PCT,
+            delta_band_base=Config.DELTA_BAND_BASE,
+            vix_shock_abs=Config.VIX_SHOCK_ABS,
+            vix_shock_roc_pct=Config.VIX_SHOCK_ROC_PCT,
+            short_vega_reduction_pct=Config.SHORT_VEGA_REDUCTION_PCT,
+            adjustment_cooldown_sec=Config.ADJUSTMENT_COOLDOWN_SEC,
+            hedge_preferred=Config.HEDGE_PREFERRED,
+            hedge_delta_offset=Config.HEDGE_DELTA_OFFSET
+        )
+        thresholds.delta_band_vix_map = Config.DELTA_BAND_TIGHT_VIX
+        
+        self.risk_manager = PortfolioRiskManager(
+            capital=Config.CAPITAL,
+            thresholds=thresholds
+        )
 
         self.exit_reasons = {
             'profit_target': 0,
@@ -149,6 +169,319 @@ class TradeManager:
         self.ce_pnl = self.realized_ce_pnl + self.unrealized_ce_pnl
         self.pe_pnl = self.realized_pe_pnl + self.unrealized_pe_pnl
         self.daily_pnl = self.ce_pnl + self.pe_pnl
+
+        # 🆕 PORTFOLIO RISK MANAGEMENT
+        self._apply_risk_management(market_data)
+
+    def _apply_risk_management(self, market_data: MarketData):
+        """
+        🆕 Apply portfolio-level risk management policies
+        """
+        if not self.active_trades:
+            return
+        
+        # Update portfolio state
+        state = self.risk_manager.update_state(market_data, self.active_trades)
+        
+        # 1. Check daily kill-switch
+        realized_pnl = self.realized_ce_pnl + self.realized_pe_pnl
+        is_stop, stop_reason = self.risk_manager.check_daily_stop(realized_pnl)
+        
+        if is_stop and not self.risk_manager.daily_stop_triggered:
+            logging.critical(f"🛑 DAILY STOP TRIGGERED: {stop_reason}")
+            self.close_all_positions("DAILY_STOP", market_data.timestamp)
+            
+            # Notify
+            threshold = -Config.CAPITAL * Config.DAILY_MAX_LOSS_PCT
+            self.notifier.notify_daily_stop(
+                daily_pnl=realized_pnl + state.unrealized_pnl,
+                threshold=threshold
+            )
+            return  # No further processing today
+        
+        # 2. Check VIX shock
+        is_shock, actions, shock_reason = self.risk_manager.check_vix_shock(market_data.india_vix)
+        
+        if is_shock and not self.risk_manager.is_in_cooldown():
+            logging.warning(f"⚡ VIX SHOCK: {shock_reason}")
+            
+            action_summary_parts = []
+            
+            # Reduce short vega exposure
+            if RiskAction.REDUCE_SIZE in actions:
+                num_closed = self._reduce_short_vega_exposure()
+                action_summary_parts.append(f"  • Closed {num_closed} positions (~40% vega reduction)")
+            
+            # Add wings (convert to defined risk)
+            if RiskAction.ADD_WINGS in actions:
+                num_wings = self._add_protective_wings()
+                action_summary_parts.append(f"  • Added {num_wings} protective wings")
+            
+            # Pause entries
+            if RiskAction.PAUSE_ENTRIES in actions:
+                action_summary_parts.append(f"  • Paused entries for {Config.ADJUSTMENT_COOLDOWN_SEC}s")
+            
+            action_summary = "\n".join(action_summary_parts)
+            
+            # Notify
+            self.notifier.notify_vix_shock(
+                prev_vix=self.risk_manager.prev_vix,
+                current_vix=market_data.india_vix,
+                action_summary=action_summary
+            )
+            
+            # Set cooldown
+            self.risk_manager.set_adjustment_cooldown()
+            return
+        
+        # 3. Check delta bands (hedge if needed)
+        needs_hedge, action, target_delta, hedge_reason = self.risk_manager.check_delta_bands(
+            vix=market_data.india_vix
+        )
+        
+        if needs_hedge and not self.risk_manager.is_in_cooldown():
+            logging.warning(f"🛡️ DELTA HEDGE: {hedge_reason}")
+            
+            net_delta_before = state.net_delta
+            
+            # Place hedge
+            hedge_placed = self._place_delta_hedge(
+                current_delta=net_delta_before,
+                target_delta=target_delta,
+                market_data=market_data
+            )
+            
+            if hedge_placed:
+                # Update state to get new delta
+                new_state = self.risk_manager.update_state(market_data, self.active_trades)
+                net_delta_after = new_state.net_delta
+                
+                # Notify
+                self.notifier.notify_delta_hedge(
+                    net_delta_before=net_delta_before,
+                    net_delta_after=net_delta_after,
+                    instruments=f"Hedge placed to neutralize delta"
+                )
+                
+                # Set cooldown
+                self.risk_manager.set_adjustment_cooldown()
+
+    def _reduce_short_vega_exposure(self) -> int:
+        """
+        🆕 Reduce short vega exposure by closing a fraction of short positions
+        Returns number of positions closed
+        """
+        reduction_pct = Config.SHORT_VEGA_REDUCTION_PCT
+        
+        # Get all short (SELL) BASE trades
+        short_trades = [
+            t for t in self.active_trades.values()
+            if t.direction == Direction.SELL and t.trade_type == "BASE"
+        ]
+        
+        if not short_trades:
+            return 0
+        
+        # Close the first ~40% of short trades
+        num_to_close = max(1, int(len(short_trades) * reduction_pct))
+        closed_count = 0
+        
+        for trade in short_trades[:num_to_close]:
+            self.close_single_leg(
+                trade.trade_id,
+                datetime.now(),
+                "VIX_SHOCK_REDUCTION",
+                skip_pnl_update=False
+            )
+            closed_count += 1
+        
+        logging.info(f"Closed {closed_count}/{len(short_trades)} short positions for vega reduction")
+        return closed_count
+
+    def _add_protective_wings(self) -> int:
+        """
+        🆕 Add protective wings to convert naked strangles to defined-risk spreads
+        Returns number of wings added
+        """
+        wings_added = 0
+        
+        # Get all short BASE trades without wings
+        short_trades = [
+            t for t in self.active_trades.values()
+            if t.direction == Direction.SELL and t.trade_type == "BASE"
+        ]
+        
+        for trade in short_trades:
+            # Calculate wing strike
+            wing_strike = self.risk_manager.calculate_wing_strikes(
+                base_strike=trade.strike_price,
+                option_type=trade.option_type,
+                spread_width=Config.WING_SPREAD_WIDTH
+            )
+            
+            # Try to place wing (buy further OTM option)
+            wing_placed = self._place_wing_order(
+                trade=trade,
+                wing_strike=wing_strike
+            )
+            
+            if wing_placed:
+                wings_added += 1
+        
+        logging.info(f"Added {wings_added} protective wings")
+        return wings_added
+
+    def _place_wing_order(self, trade: Trade, wing_strike: float) -> bool:
+        """
+        🆕 Place a wing order (buy OTM option to cap risk)
+        Returns True if successful
+        """
+        try:
+            # Find wing symbol
+            if self.broker.backtest_data is not None:
+                from .utils import Utils
+                wing_symbol = Utils.prepare_option_symbol(
+                    wing_strike, trade.option_type, trade.expiry
+                )
+                wing_price = self.broker.get_quote(wing_symbol)
+            else:
+                wing_instrument = self.broker.find_live_option_symbol(
+                    wing_strike, trade.option_type, trade.expiry
+                )
+                if not wing_instrument:
+                    logging.warning(f"Wing instrument not found for strike {wing_strike}")
+                    return False
+                wing_symbol = f"NFO:{wing_instrument['tradingsymbol']}"
+                wing_price = self.broker.get_quote(wing_symbol)
+            
+            # Check cost budget
+            cost_per_lot = wing_price * trade.lot_size
+            if cost_per_lot > Config.WING_MAX_COST_PER_LOT:
+                logging.warning(
+                    f"Wing cost ₹{cost_per_lot:.2f} exceeds budget "
+                    f"₹{Config.WING_MAX_COST_PER_LOT:.2f}"
+                )
+                return False
+            
+            # Place BUY order
+            wing_order_id = self.broker.place_order(
+                wing_symbol, trade.qty, Direction.BUY, wing_price
+            )
+            
+            if not wing_order_id:
+                return False
+            
+            # Create wing trade
+            wing_trade = Trade(
+                trade_id=wing_order_id,
+                symbol=wing_symbol,
+                qty=trade.qty,
+                direction=Direction.BUY,
+                price=wing_price,
+                timestamp=datetime.now(),
+                option_type=trade.option_type,
+                strike_price=wing_strike,
+                expiry=trade.expiry,
+                spot_at_entry=trade.spot_at_entry,
+                trade_type="WING"
+            )
+            
+            self.add_trade(wing_trade)
+            logging.info(f"Wing added: {wing_symbol} @ ₹{wing_price:.2f}")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to place wing order: {e}", exc_info=True)
+            return False
+
+    def _place_delta_hedge(self, current_delta: float, target_delta: float,
+                          market_data: MarketData) -> bool:
+        """
+        🆕 Place delta hedge to bring portfolio delta within bands
+        Returns True if successful
+        """
+        try:
+            # Get hedge sizing
+            option_type, num_lots, target_option_delta = self.risk_manager.get_hedge_sizing(
+                current_delta, target_delta
+            )
+            
+            if num_lots <= 0:
+                logging.warning("Hedge sizing resulted in 0 lots")
+                return False
+            
+            # Find hedge instrument (nearest expiry with target delta)
+            expiry = self._get_nearest_expiry()
+            
+            # For simplicity, use ATM + offset for hedge strike
+            spot = market_data.nifty_spot
+            if option_type == "CE":
+                # Buy CE for short delta portfolio
+                hedge_strike = round((spot + 200) / 50) * 50  # Slightly OTM
+            else:
+                # Buy PE for long delta portfolio
+                hedge_strike = round((spot - 200) / 50) * 50  # Slightly OTM
+            
+            # Place hedge order
+            if self.broker.backtest_data is not None:
+                from .utils import Utils
+                hedge_symbol = Utils.prepare_option_symbol(
+                    hedge_strike, option_type, expiry
+                )
+                hedge_price = self.broker.get_quote(hedge_symbol)
+            else:
+                hedge_instrument = self.broker.find_live_option_symbol(
+                    hedge_strike, option_type, expiry
+                )
+                if not hedge_instrument:
+                    logging.warning(f"Hedge instrument not found")
+                    return False
+                hedge_symbol = f"NFO:{hedge_instrument['tradingsymbol']}"
+                hedge_price = self.broker.get_quote(hedge_symbol)
+            
+            # Place BUY order
+            hedge_order_id = self.broker.place_order(
+                hedge_symbol, num_lots, Direction.BUY, hedge_price
+            )
+            
+            if not hedge_order_id:
+                return False
+            
+            # Create hedge trade
+            hedge_trade = Trade(
+                trade_id=hedge_order_id,
+                symbol=hedge_symbol,
+                qty=num_lots,
+                direction=Direction.BUY,
+                price=hedge_price,
+                timestamp=datetime.now(),
+                option_type=option_type,
+                strike_price=hedge_strike,
+                expiry=expiry,
+                spot_at_entry=spot,
+                trade_type="HEDGE"
+            )
+            
+            self.add_trade(hedge_trade)
+            self.risk_manager.hedge_position_count += 1
+            
+            logging.info(
+                f"Delta hedge placed: {hedge_symbol} × {num_lots} lots @ ₹{hedge_price:.2f}"
+            )
+            return True
+            
+        except Exception as e:
+            logging.error(f"Failed to place delta hedge: {e}", exc_info=True)
+            return False
+
+    def _get_nearest_expiry(self) -> date:
+        """Get nearest weekly expiry for hedge positions"""
+        from datetime import datetime, timedelta
+        current = datetime.now().date()
+        days_to_add = (Config.WEEKLY_EXPIRY_DAY - current.weekday()) % 7
+        if days_to_add == 0:
+            days_to_add = 7
+        return current + timedelta(days=days_to_add)
 
     def calculate_transaction_cost(self, trade: Trade) -> float:
         """
@@ -371,6 +704,9 @@ class TradeManager:
         self.exit_reasons = {k: 0 for k in self.exit_reasons}
         self.last_entry_timestamp = None
         self._grace_logged = False
+        
+        # 🆕 Reset risk manager
+        self.risk_manager.reset_daily()
 
     def get_performance_metrics(self) -> Any:
         class Metrics:
