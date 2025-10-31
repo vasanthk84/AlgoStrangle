@@ -1,15 +1,14 @@
 """
-Market Regime Detector for Adaptive Options Strategy
-Save as: strangle/regime_detector.py
+Market Regime Detector - FIXED
+✅ Fix #6: Now uses 50-day lookback (was 20)
+✅ Multi-timeframe validation
+✅ VIX regime confirmation
 """
 
 from typing import Tuple, List, Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from enum import Enum
 import numpy as np
-
-# Note: Config is not imported here to keep the module self-contained,
-# lookback days and thresholds are passed or set internally.
 
 
 class MarketRegime(Enum):
@@ -24,118 +23,267 @@ class MarketRegime(Enum):
 class StrategyType(Enum):
     """Strategy to use based on regime"""
     SHORT_STRANGLE = "SHORT_STRANGLE"
-    SHORT_PUT_SPREAD = "SHORT_PUT_SPREAD"  # Bullish income
-    SHORT_CALL_SPREAD = "SHORT_CALL_SPREAD"  # Bearish income
+    SHORT_PUT_SPREAD = "SHORT_PUT_SPREAD"
+    SHORT_CALL_SPREAD = "SHORT_CALL_SPREAD"
     IRON_CONDOR = "IRON_CONDOR"
     SKIP = "SKIP"
 
 
 class RegimeDetector:
     """
-    Detects market regime and recommends appropriate strategy
+    ✅ FIX #6: Uses 50-day lookback for reliable trend detection
     """
 
-    def __init__(self, lookback_days: int = 20):
+    def __init__(self, lookback_days: int = 50):
+        """
+        Args:
+            lookback_days: Primary trend lookback (default 50, was 20)
+        """
         self.lookback_days = lookback_days
+        self.fast_lookback = 10  # Short-term momentum
+
         self.spot_history: List[float] = []
         self.vix_history: List[float] = []
+        self.last_history_update_date: Optional[date] = None
 
-        # Configurable thresholds (defaults used if Config is not available)
-        self.trend_threshold_pct = 4.0  # 4% move in lookback = trending
-        self.range_position_lower = 0.30  # Bottom 30% of range
-        self.range_position_upper = 0.70  # Top 70% of range
+        # ✅ FIX #6: More conservative thresholds for 50-day window
+        self.trend_threshold_pct = 3.0  # 3% move = trending (was 4%)
+        self.range_position_lower = 0.30
+        self.range_position_upper = 0.70
+
+        # VIX thresholds
         self.vix_threshold = 12.0
         self.vix_high_threshold = 18.0
         self.vix_low_threshold = 8.0
 
-    def detect_regime(self, spot: float, vix: float, nifty_open: float, nifty_high: float, nifty_low: float) -> Tuple[MarketRegime, str]:
+    def update_history(self, current_timestamp: datetime, spot_price: float):
         """
-        Detects the current market regime based on VIX and spot price movement.
+        ✅ FIX #6: Updates history once per day (prevents overfitting to intraday noise)
+        """
+        current_date = current_timestamp.date()
 
-        Args:
-            spot: Current Nifty spot price.
-            vix: Current India VIX level.
-            nifty_open: Nifty daily open.
-            nifty_high: Nifty daily high.
-            nifty_low: Nifty daily low.
+        # Only add one entry per day
+        if self.last_history_update_date is None or current_date > self.last_history_update_date:
+            self.spot_history.append(spot_price)
+            self.last_history_update_date = current_date
+
+            # Trim to prevent indefinite growth
+            if len(self.spot_history) > self.lookback_days * 2:
+                self.spot_history = self.spot_history[-(self.lookback_days * 2):]
+
+    def detect_regime(self, spot: float, vix: float, nifty_open: float,
+                     nifty_high: float, nifty_low: float) -> Tuple[MarketRegime, str]:
+        """
+        ✅ FIX #6: Enhanced regime detection with multi-timeframe analysis
 
         Returns:
-            A tuple of (MarketRegime, reason_string).
+            Tuple of (MarketRegime, reason_string)
         """
 
-        # 1. Volatility Regime Check
+        # Priority 1: Volatility regime (overrides everything)
         if vix >= self.vix_high_threshold:
-            return MarketRegime.HIGH_VOLATILITY, f"VIX ({vix:.1f}) is above HIGH threshold ({self.vix_high_threshold})."
+            return (
+                MarketRegime.HIGH_VOLATILITY,
+                f"VIX ({vix:.1f}) above HIGH threshold ({self.vix_high_threshold})"
+            )
 
         if vix <= self.vix_low_threshold:
-            return MarketRegime.LOW_VOLATILITY, f"VIX ({vix:.1f}) is below LOW threshold ({self.vix_low_threshold})."
+            return (
+                MarketRegime.LOW_VOLATILITY,
+                f"VIX ({vix:.1f}) below LOW threshold ({self.vix_low_threshold})"
+            )
 
-        # 2. Trend Regime Check (Requires sufficient history)
+        # Priority 2: Trend detection (requires sufficient history)
         if len(self.spot_history) < self.lookback_days:
-            return MarketRegime.RANGE_BOUND, "Insufficient spot history for trend detection."
+            return (
+                MarketRegime.RANGE_BOUND,
+                f"Insufficient history ({len(self.spot_history)}/{self.lookback_days} days)"
+            )
 
-        lookback_prices = np.array(self.spot_history[-self.lookback_days:])
-        highest = np.max(lookback_prices)
-        lowest = np.min(lookback_prices)
+        # ✅ FIX #6: Long-term trend (50 days)
+        long_term_prices = np.array(self.spot_history[-self.lookback_days:])
+        long_term_high = np.max(long_term_prices)
+        long_term_low = np.min(long_term_prices)
+        long_term_range_pct = ((long_term_high - long_term_low) / long_term_low) * 100
 
-        # Trend check: 4% move from min to max in lookback period
-        trend_range_pct = ((highest - lowest) / lowest) * 100
-
-        # Current price position within the range (0% at low, 100% at high)
-        if highest > lowest:
-            range_position = (spot - lowest) / (highest - lowest)
+        # Short-term momentum (10 days)
+        if len(self.spot_history) >= self.fast_lookback:
+            short_term_prices = np.array(self.spot_history[-self.fast_lookback:])
+            short_term_change_pct = (
+                (short_term_prices[-1] - short_term_prices[0]) / short_term_prices[0]
+            ) * 100
         else:
-            range_position = 0.5 # Default to middle if no movement
+            short_term_change_pct = 0.0
 
-        if trend_range_pct >= self.trend_threshold_pct:
-            # Trending regime check
-            if range_position >= self.range_position_upper:
-                return MarketRegime.TRENDING_UP, f"Trending Up: Spot near high of {self.lookback_days}-day range ({highest:.0f}). Range: {trend_range_pct:.1f}%."
-            elif range_position <= self.range_position_lower:
-                return MarketRegime.TRENDING_DOWN, f"Trending Down: Spot near low of {self.lookback_days}-day range ({lowest:.0f}). Range: {trend_range_pct:.1f}%."
+        # Current position in range (0% = at low, 100% = at high)
+        if long_term_high > long_term_low:
+            range_position = (spot - long_term_low) / (long_term_high - long_term_low)
+        else:
+            range_position = 0.5
+
+        # ✅ DECISION LOGIC: Multi-timeframe confirmation
+
+        # Strong uptrend: Long-term range is wide AND short-term momentum is up
+        if long_term_range_pct >= self.trend_threshold_pct:
+            if range_position >= self.range_position_upper and short_term_change_pct > 1.0:
+                return (
+                    MarketRegime.TRENDING_UP,
+                    f"Trending Up: 50-day range {long_term_range_pct:.1f}%, "
+                    f"10-day momentum +{short_term_change_pct:.1f}%, "
+                    f"near high ({long_term_high:.0f})"
+                )
+
+            # Strong downtrend: Long-term range is wide AND short-term momentum is down
+            elif range_position <= self.range_position_lower and short_term_change_pct < -1.0:
+                return (
+                    MarketRegime.TRENDING_DOWN,
+                    f"Trending Down: 50-day range {long_term_range_pct:.1f}%, "
+                    f"10-day momentum {short_term_change_pct:.1f}%, "
+                    f"near low ({long_term_low:.0f})"
+                )
+
+            # Range-bound: Wide range but conflicting signals
             else:
-                # If trending but spot is in the middle of the range, call it range bound for safety
-                return MarketRegime.RANGE_BOUND, f"Range-bound: Trend range is high ({trend_range_pct:.1f}%) but spot is mid-range."
+                return (
+                    MarketRegime.RANGE_BOUND,
+                    f"Range-bound: Wide 50-day range ({long_term_range_pct:.1f}%) "
+                    f"but mid-range position or mixed momentum"
+                )
 
-        # 3. Default Regime
-        return MarketRegime.RANGE_BOUND, f"Range-bound: Trend range is low ({trend_range_pct:.1f}%) and VIX is medium."
+        # Tight range = range-bound
+        return (
+            MarketRegime.RANGE_BOUND,
+            f"Range-bound: Tight 50-day range ({long_term_range_pct:.1f}%), "
+            f"VIX medium ({vix:.1f})"
+        )
 
-    def recommend_strategy(self, regime: MarketRegime, vix: float, iv_rank: float) -> Tuple[StrategyType, str]:
+    def is_regime_valid(self, regime: MarketRegime, vix: float) -> bool:
         """
-        Recommends the strategy based on the detected market regime.
-        (This method is not used in the current strategy.py logic but is included for completeness.)
+        ✅ FIX #6: Validate regime consistency with VIX
+
+        Prevents false signals (e.g., "Range Bound" when VIX is spiking)
         """
+        # High VIX + "Range Bound" = contradiction
+        if vix > 20 and regime == MarketRegime.RANGE_BOUND:
+            return False
+
+        # Low VIX + "Trending" = probably false breakout
+        if vix < 12 and regime in [MarketRegime.TRENDING_UP, MarketRegime.TRENDING_DOWN]:
+            return False
+
+        return True
+
+    def get_regime_confidence(self) -> float:
+        """
+        ✅ FIX #6: Calculate confidence score (0-100%)
+
+        Returns higher confidence with more history
+        """
+        if len(self.spot_history) < self.fast_lookback:
+            return 0.0
+        elif len(self.spot_history) < self.lookback_days:
+            return 50.0
+        else:
+            # Full confidence with 50+ days of data
+            return min(100.0, (len(self.spot_history) / self.lookback_days) * 100)
+
+    def recommend_strategy(self, regime: MarketRegime, vix: float,
+                          iv_rank: float) -> Tuple[StrategyType, str]:
+        """
+        Recommend strategy based on regime and VIX
+        """
+        # Validate regime first
+        if not self.is_regime_valid(regime, vix):
+            return (
+                StrategyType.SKIP,
+                f"Regime {regime.value} conflicts with VIX {vix:.1f}"
+            )
+
+        # Range-bound: Short strangle
         if regime == MarketRegime.RANGE_BOUND:
-            return StrategyType.SHORT_STRANGLE, "Range-bound: Use Short Strangle for theta decay."
+            if vix < self.vix_low_threshold:
+                return (
+                    StrategyType.SKIP,
+                    "Range-bound but VIX too low (premium not worth risk)"
+                )
+            return (
+                StrategyType.SHORT_STRANGLE,
+                "Range-bound market: Use short strangle for theta decay"
+            )
 
+        # Low volatility: Iron condor (defined risk)
         if regime == MarketRegime.LOW_VOLATILITY:
-            # Low VIX suggests low premium, high risk of sudden spike. Skip or use Iron Condor.
-            if iv_rank < 20: # Example low rank threshold
-                return StrategyType.SKIP, "Low Volatility/Low IV Rank: Skipping entry."
-            return StrategyType.IRON_CONDOR, "Low Volatility/Medium IV Rank: Use Iron Condor (defined risk)."
+            if iv_rank < 20:
+                return (
+                    StrategyType.SKIP,
+                    "Low volatility + low IV rank: Skip entry"
+                )
+            return (
+                StrategyType.IRON_CONDOR,
+                "Low volatility: Use iron condor (defined risk)"
+            )
 
+        # High volatility: Skip (too risky)
         if regime == MarketRegime.HIGH_VOLATILITY:
-            # High VIX suggests high premium, but high risk. Skip or use Iron Condor.
-            return StrategyType.SKIP, "High Volatility: Skipping entry due to high risk."
+            return (
+                StrategyType.SKIP,
+                f"High volatility (VIX {vix:.1f}): Too risky to enter"
+            )
 
+        # Trending up: Bullish put spread
         if regime == MarketRegime.TRENDING_UP:
-            # Bullish trend: Sell OTM Put Spread
-            return StrategyType.SHORT_PUT_SPREAD, "Trending Up: Use Short Put Spread (Bullish income)."
+            return (
+                StrategyType.SHORT_PUT_SPREAD,
+                "Trending up: Use short put spread (bullish income)"
+            )
 
+        # Trending down: Bearish call spread
         if regime == MarketRegime.TRENDING_DOWN:
-            # Bearish trend: Sell OTM Call Spread
-            return StrategyType.SHORT_CALL_SPREAD, "Trending Down: Use Short Call Spread (Bearish income)."
+            return (
+                StrategyType.SHORT_CALL_SPREAD,
+                "Trending down: Use short call spread (bearish income)"
+            )
 
-        return StrategyType.SKIP, "Unknown regime. Skipping."
+        return (StrategyType.SKIP, "Unknown regime")
 
     def reset_daily(self):
         """
-        Resets any daily state, ensuring spot/vix history is limited to the lookback period.
-        This fixes the AttributeError.
+        Reset daily state
+        ✅ FIX #6: Preserves spot history (don't truncate daily data!)
         """
-        # Truncate history to prevent indefinite growth in backtest
-        if len(self.spot_history) > self.lookback_days * 2: # Keep more than necessary to avoid errors, but limit size
-            self.spot_history = self.spot_history[-self.lookback_days * 2:]
-
+        # Only truncate VIX history to prevent indefinite growth
         if len(self.vix_history) > self.lookback_days * 2:
             self.vix_history = self.vix_history[-self.lookback_days * 2:]
+
+    def get_statistics(self) -> dict:
+        """
+        ✅ FIX #6: Return regime detection statistics
+        """
+        if len(self.spot_history) < 2:
+            return {
+                'days_of_data': 0,
+                'confidence': 0.0,
+                'trend_range_pct': 0.0,
+                'current_position': 0.0
+            }
+
+        long_term_prices = np.array(self.spot_history[-self.lookback_days:]) \
+            if len(self.spot_history) >= self.lookback_days \
+            else np.array(self.spot_history)
+
+        long_term_high = np.max(long_term_prices)
+        long_term_low = np.min(long_term_prices)
+        current_spot = self.spot_history[-1]
+
+        trend_range_pct = ((long_term_high - long_term_low) / long_term_low) * 100
+        current_position = (current_spot - long_term_low) / (long_term_high - long_term_low) \
+            if long_term_high > long_term_low else 0.5
+
+        return {
+            'days_of_data': len(self.spot_history),
+            'confidence': self.get_regime_confidence(),
+            'trend_range_pct': trend_range_pct,
+            'current_position': current_position * 100,
+            'range_high': long_term_high,
+            'range_low': long_term_low
+        }

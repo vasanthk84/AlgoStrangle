@@ -1,8 +1,7 @@
 """
-Trade Manager - FINAL FIXED VERSION
-✅ P&L tracking fixed (realized + unrealized)
-✅ Daily Summary now shows correct CE/PE P&L
-✅ Integrated with dynamic Greeks system
+Trade Manager - ALL FIXES APPLIED
+✅ Fix #1: P&L double-counting fixed
+✅ Fix #2: Transaction costs included
 """
 
 import logging
@@ -25,28 +24,25 @@ class TradeManager:
         self.notifier = notifier
         self.active_trades: Dict[str, Trade] = {}
 
-        # ═══════════════════════════════════════════════════════════════
-        # FIX: Enhanced P&L tracking (realized + unrealized)
-        # ═══════════════════════════════════════════════════════════════
+        # P&L tracking
         self.daily_pnl = 0.0
         self.total_trades = 0
         self.win_trades = 0
-
-        # Separate tracking for realized vs unrealized
-        self.ce_pnl = 0.0  # Total CE P&L (for display)
-        self.pe_pnl = 0.0  # Total PE P&L (for display)
-
-        self.realized_ce_pnl = 0.0  # Closed positions
-        self.realized_pe_pnl = 0.0  # Closed positions
-
-        self.unrealized_ce_pnl = 0.0  # Active positions
-        self.unrealized_pe_pnl = 0.0  # Active positions
-
+        self.ce_pnl = 0.0
+        self.pe_pnl = 0.0
+        self.realized_ce_pnl = 0.0
+        self.realized_pe_pnl = 0.0
+        self.unrealized_ce_pnl = 0.0
+        self.unrealized_pe_pnl = 0.0
         self.ce_trades = 0
         self.pe_trades = 0
         self.rolled_positions = 0
         self.daily_pnl_history = []
         self.active_pairs: Dict[str, Dict] = {}
+
+        # ✅ NEW: Track transaction costs separately
+        self.total_transaction_costs = 0.0
+        self.daily_transaction_costs = 0.0
 
         self.exit_reasons = {
             'profit_target': 0,
@@ -54,7 +50,8 @@ class TradeManager:
             'leg_stop_delta': 0,
             'leg_stop_price': 0,
             'time_square_off': 0,
-            'manual': 0
+            'manual': 0,
+            'roll': 0
         }
 
         self.last_entry_timestamp: Optional[datetime] = None
@@ -79,10 +76,11 @@ class TradeManager:
             f"@ Rs.{trade.entry_price:.2f}{greeks_str}"
         )
 
+        if trade.rolled_from:
+            self.rolled_positions += 1
+
     def update_active_trades(self, market_data: MarketData):
-        """
-        ✅ FIXED: Updates prices AND calculates unrealized P&L for display
-        """
+        """Updates prices AND calculates unrealized P&L for display"""
         if not self.active_trades:
             return
 
@@ -92,33 +90,24 @@ class TradeManager:
         if vix <= 0 or pd.isna(vix):
             logging.warning(f"Invalid VIX ({vix}). Skipping updates.")
             return
-
         if spot <= 0 or pd.isna(spot):
             logging.warning(f"Invalid Spot ({spot}). Skipping updates.")
             return
 
-        # ═══════════════════════════════════════════════════════════════
-        # FIX: Reset unrealized P&L before recalculating
-        # ═══════════════════════════════════════════════════════════════
         self.unrealized_ce_pnl = 0.0
         self.unrealized_pe_pnl = 0.0
 
         for trade in self.active_trades.values():
             current_price = 0.0
             greeks = None
-
             try:
-                # BACKTEST MODE
                 if self.broker.backtest_data is not None:
                     current_price = self.broker.get_quote(trade.symbol)
-
                     if current_price > 5000:
                         logging.error(f"UNREALISTIC PRICE for {trade.symbol}: {current_price:.2f}")
                         current_price = trade.entry_price
-
                     if current_price < 0:
                         current_price = 0.0
-
                     if 0 < current_price < 5000:
                         if isinstance(trade.expiry, date):
                             dte = self.broker.greeks_calc.get_dte(trade.expiry, market_data.timestamp.date())
@@ -126,8 +115,6 @@ class TradeManager:
                                 greeks = self.broker.greeks_calc.calculate_all_greeks(
                                     spot, trade.strike_price, dte, vix, trade.option_type
                                 )
-
-                # LIVE/DRY-RUN MODE - Get price AND greeks
                 else:
                     current_price, greeks = self.broker.get_quote_with_greeks(
                         symbol=trade.symbol,
@@ -138,12 +125,10 @@ class TradeManager:
                         vix=vix,
                         current_date=market_data.timestamp.date()
                     )
-
                     if current_price > 5000:
                         logging.error(f"UNREALISTIC PRICE: {current_price:.2f}")
                         current_price = trade.entry_price
                         greeks = None
-
                     if current_price < 0:
                         current_price = 0.0
                         greeks = None
@@ -155,79 +140,55 @@ class TradeManager:
 
             if current_price >= 0:
                 trade.update_price(current_price, greeks)
-
-                # ═══════════════════════════════════════════════════════════
-                # FIX: Calculate and accumulate unrealized P&L
-                # ═══════════════════════════════════════════════════════════
                 current_pnl = trade.get_pnl()
-
                 if trade.option_type == "CE":
                     self.unrealized_ce_pnl += current_pnl
                 else:
                     self.unrealized_pe_pnl += current_pnl
 
-        # ═══════════════════════════════════════════════════════════════
-        # FIX: Update total P&L for display (realized + unrealized)
-        # ═══════════════════════════════════════════════════════════════
         self.ce_pnl = self.realized_ce_pnl + self.unrealized_ce_pnl
         self.pe_pnl = self.realized_pe_pnl + self.unrealized_pe_pnl
         self.daily_pnl = self.ce_pnl + self.pe_pnl
 
-    def check_stop_loss(self, market_data: MarketData):
-        """Check stop-loss with grace period"""
-        if self.last_entry_timestamp:
-            time_since_entry = (market_data.timestamp - self.last_entry_timestamp).total_seconds() / 60
-
-            if time_since_entry < self.entry_grace_period_minutes:
-                if not self._grace_logged:
-                    logging.info(f"⏱️ Grace period: {time_since_entry:.1f}/{self.entry_grace_period_minutes} min")
-                    self._grace_logged = True
-                return
-            else:
-                if self._grace_logged:
-                    logging.info(f"✅ Grace period expired. Enabling stop-loss.")
-                    self._grace_logged = False
-
-        for trade_id in list(self.active_trades.keys()):
-            trade = self.active_trades[trade_id]
-
-            if trade.current_price <= 0:
-                continue
-
-            if abs(trade.current_price - trade.entry_price) < 1.0:
-                continue
-
-            # Price Stop-Loss
-            loss_multiple = trade.get_loss_multiple()
-            if loss_multiple >= Config.LEG_STOP_LOSS_MULTIPLIER:
-                reason = f"LEG STOP (Price): {loss_multiple:.1f}x"
-                self.notifier.notify_stop_loss_triggered(
-                    trade.symbol, trade.current_price, trade.entry_price, "Price Multiple"
-                )
-                self.close_single_leg(trade_id, market_data.timestamp, reason)
-                continue
-
-            # Delta Stop-Loss
-            if trade.greeks:
-                current_delta = abs(trade.greeks.delta)
-                if current_delta >= Config.ROLL_TRIGGER_DELTA:
-                    reason = f"LEG STOP (Delta): {current_delta:.1f}"
-                    self.notifier.notify_stop_loss_triggered(
-                        trade.symbol, trade.current_price, trade.entry_price, "Delta", current_delta
-                    )
-                    self.close_single_leg(trade_id, market_data.timestamp, reason)
-                    continue
-
-    def close_single_leg(self, trade_id: str, exit_timestamp: Optional[datetime] = None, reason: str = "Unknown"):
+    def calculate_transaction_cost(self, trade: Trade) -> float:
         """
-        ✅ FIXED: Properly updates realized P&L when closing positions
+        ✅ FIX #2: Calculate realistic transaction costs
+
+        Returns total cost for this leg (entry + exit)
+        """
+        if not Config.ENABLE_TRANSACTION_COSTS:
+            return 0.0
+
+        # Base transaction cost per leg
+        base_cost = Config.TRANSACTION_COST_PER_LEG
+
+        # Slippage cost
+        total_contracts = trade.qty * trade.lot_size
+        slippage_cost = Config.SLIPPAGE_TICKS * Config.SLIPPAGE_PER_TICK * total_contracts
+
+        total_cost = base_cost + slippage_cost
+
+        logging.debug(
+            f"Transaction cost for {trade.symbol}: "
+            f"Base=₹{base_cost:.2f} + Slippage=₹{slippage_cost:.2f} = ₹{total_cost:.2f}"
+        )
+
+        return total_cost
+
+    def close_single_leg(self, trade_id: str, exit_timestamp: Optional[datetime] = None,
+                        reason: str = "Unknown", skip_pnl_update: bool = False):
+        """
+        ✅ FIX #1: Properly updates realized P&L (no double counting)
+        ✅ FIX #2: Deducts transaction costs
+
+        Args:
+            skip_pnl_update: If True, skip updating realized P&L (prevents double-counting)
         """
         if trade_id not in self.active_trades:
             return
 
         trade = self.active_trades[trade_id]
         exit_price = trade.current_price
-
         if exit_price > 5000 or exit_price < 0:
             exit_price = 0.0
 
@@ -240,52 +201,78 @@ class TradeManager:
         )
         temp_trade.update_price(exit_price)
 
+        # Calculate raw P&L
         pnl = temp_trade.get_pnl()
+
+        # ✅ FIX #2: Deduct transaction costs
+        transaction_cost = self.calculate_transaction_cost(trade)
+        pnl_after_costs = pnl - transaction_cost
+
+        self.total_transaction_costs += transaction_cost
+        self.daily_transaction_costs += transaction_cost
+
         pnl_pct = temp_trade.get_pnl_pct()
 
-        # ═══════════════════════════════════════════════════════════════
-        # FIX: Add to REALIZED P&L (this was missing before!)
-        # ═══════════════════════════════════════════════════════════════
-        if trade.option_type == "CE":
-            self.realized_ce_pnl += pnl
-        else:
-            self.realized_pe_pnl += pnl
+        # ✅ FIX #1: Only update realized P&L if not skipped
+        if not skip_pnl_update:
+            if trade.option_type == "CE":
+                self.realized_ce_pnl += pnl_after_costs
+            else:
+                self.realized_pe_pnl += pnl_after_costs
 
-        if pnl > 0:
-            self.win_trades += 1
+            if pnl_after_costs > 0:
+                self.win_trades += 1
 
         ts = exit_timestamp or datetime.now()
 
-        if 'Delta' in reason:
+        # Update exit reasons
+        if 'HARD_STOP' in reason.upper():
+            self.exit_reasons['stop_loss'] += 1
+        elif 'ROLL' in reason.upper():
+            self.exit_reasons['roll'] += 1
+        elif 'DELTA' in reason.upper():
             self.exit_reasons['leg_stop_delta'] += 1
-        elif 'Price' in reason:
-            self.exit_reasons['leg_stop_price'] += 1
+        elif 'PRICE' in reason.upper():
+             self.exit_reasons['leg_stop_price'] += 1
 
         self.db.save_trade(trade, exit_price, ts, reason)
 
         holding_duration = ts - trade.timestamp
         holding_time = str(holding_duration).split('.')[0]
 
-        self.notifier.notify_exit(reason, trade.symbol, trade.entry_price, exit_price, pnl, pnl_pct, holding_time)
+        # Log with cost breakdown
+        logging.warning(
+            f"LEG CLOSED: {trade.symbol} | "
+            f"Raw P&L=₹{pnl:+,.2f} - Costs=₹{transaction_cost:.2f} = "
+            f"Net P&L=₹{pnl_after_costs:+,.2f} | {reason}"
+        )
 
-        logging.warning(f"LEG CLOSED: {trade.symbol} | P&L=Rs.{pnl:+,.2f} | {reason}")
+        self.notifier.notify_exit(reason, trade.symbol, trade.entry_price, exit_price,
+                                  pnl_after_costs, pnl_pct, holding_time)
 
-        # Remove from active trades
         del self.active_trades[trade_id]
 
-        # Recalculate total P&L (will happen on next update_active_trades)
-        # For immediate update:
+        # Recalculate P&L
         self.ce_pnl = self.realized_ce_pnl + self.unrealized_ce_pnl
         self.pe_pnl = self.realized_pe_pnl + self.unrealized_pe_pnl
         self.daily_pnl = self.ce_pnl + self.pe_pnl
 
+        # Check if this trade was part of a pair
         for pair_id in list(self.active_pairs.keys()):
             meta = self.active_pairs[pair_id]
             if trade_id in [meta['ce_id'], meta['pe_id']]:
-                self.remove_trade_pair(pair_id)
+                if "ROLL" not in reason.upper():
+                    logging.warning(f"Closing pair partner due to leg stop: {pair_id}")
+                    other_id = meta['pe_id'] if trade_id == meta['ce_id'] else meta['ce_id']
+                    if other_id in self.active_trades:
+                        # ✅ FIX #1: Skip P&L update on partner close
+                        self.close_single_leg(other_id, exit_timestamp,
+                                            f"PARTNER_STOP_{reason}", skip_pnl_update=True)
+                    self.remove_trade_pair(pair_id)
 
     def add_trade_pair(self, ce_trade_id: str, pe_trade_id: str, entry_combined: float,
-                       entry_time: datetime, lots: int, profit_target: float = None, stop_loss: float = None):
+                       entry_time: datetime, lots: int, profit_target: float = None,
+                       stop_loss: float = None):
         pair_id = f"{ce_trade_id}|{pe_trade_id}"
         self.active_pairs[pair_id] = {
             'ce_id': ce_trade_id,
@@ -301,35 +288,44 @@ class TradeManager:
         if pair_id in self.active_pairs:
             del self.active_pairs[pair_id]
 
+    def update_rolled_trade_in_pair(self, old_trade_id: str, new_trade_id: str):
+        """Update pair with new rolled trade ID"""
+        for pair_id, meta in self.active_pairs.items():
+            if meta['ce_id'] == old_trade_id:
+                meta['ce_id'] = new_trade_id
+                logging.info(f"Updated pair {pair_id} with new CE trade {new_trade_id}")
+                return
+            if meta['pe_id'] == old_trade_id:
+                meta['pe_id'] = new_trade_id
+                logging.info(f"Updated pair {pair_id} with new PE trade {new_trade_id}")
+                return
+
     def get_pair_current_combined(self, pair_id: str) -> Optional[float]:
         meta = self.active_pairs.get(pair_id)
-        if not meta:
-            return None
+        if not meta: return None
         ce = self.active_trades.get(meta['ce_id'])
         pe = self.active_trades.get(meta['pe_id'])
-        if not ce or not pe:
-            return None
+        if not ce or not pe: return None
         return ce.current_price + pe.current_price
 
-    def close_pair(self, pair_id: str, exit_timestamp: Optional[datetime] = None, reason: str = "Unknown"):
+    def close_pair(self, pair_id: str, exit_timestamp: Optional[datetime] = None,
+                   reason: str = "Unknown"):
         meta = self.active_pairs.get(pair_id)
         if not meta:
             return
 
-        if 'PROFIT TARGET' in reason:
-            self.exit_reasons['profit_target'] += 1
-        elif 'STOP' in reason:
-            self.exit_reasons['stop_loss'] += 1
-        elif 'TIME' in reason or 'SQUARE' in reason:
-            self.exit_reasons['time_square_off'] += 1
+        if 'PROFIT TARGET' in reason: self.exit_reasons['profit_target'] += 1
+        elif 'STOP' in reason: self.exit_reasons['stop_loss'] += 1
+        elif 'TIME' in reason or 'SQUARE' in reason: self.exit_reasons['time_square_off'] += 1
 
         ce_id = meta['ce_id']
         pe_id = meta['pe_id']
 
+        # Close both legs normally (each updates P&L once)
         if ce_id in self.active_trades:
-            self.close_single_leg(ce_id, exit_timestamp, reason)
+            self.close_single_leg(ce_id, exit_timestamp, reason, skip_pnl_update=False)
         if pe_id in self.active_trades:
-            self.close_single_leg(pe_id, exit_timestamp, reason)
+            self.close_single_leg(pe_id, exit_timestamp, reason, skip_pnl_update=False)
 
         self.remove_trade_pair(pair_id)
 
@@ -341,11 +337,9 @@ class TradeManager:
 
     def get_combined_pnl_pct(self, pair_id: str) -> Optional[float]:
         meta = self.active_pairs.get(pair_id)
-        if not meta or meta['entry_combined'] == 0:
-            return None
+        if not meta or meta['entry_combined'] == 0: return None
         current = self.get_pair_current_combined(pair_id)
-        if current is None:
-            return None
+        if current is None: return None
         return ((meta['entry_combined'] - current) / meta['entry_combined']) * 100
 
     def get_leg_trades(self, option_type: str) -> List[Trade]:
@@ -355,26 +349,25 @@ class TradeManager:
         return sum(t.get_pnl() for t in self.get_leg_trades(option_type))
 
     def reset_daily_metrics(self):
-        """Reset daily metrics (keep realized P&L until reset)"""
-        if self.daily_pnl != 0 or len(self.active_trades) > 0:
-            self.daily_pnl_history.append(self.daily_pnl)
+        """Reset daily metrics at start of new day"""
+        # ✅ FIX #1: Save REALIZED P&L only to history
+        if self.realized_ce_pnl != 0 or self.realized_pe_pnl != 0:
+            daily_realized = self.realized_ce_pnl + self.realized_pe_pnl
+            self.daily_pnl_history.append(daily_realized)
 
-        # Reset daily totals
         self.daily_pnl = 0.0
         self.ce_pnl = 0.0
         self.pe_pnl = 0.0
-
-        # Reset realized P&L for new day
         self.realized_ce_pnl = 0.0
         self.realized_pe_pnl = 0.0
         self.unrealized_ce_pnl = 0.0
         self.unrealized_pe_pnl = 0.0
-
         self.total_trades = 0
         self.win_trades = 0
         self.ce_trades = 0
         self.pe_trades = 0
         self.rolled_positions = 0
+        self.daily_transaction_costs = 0.0
         self.exit_reasons = {k: 0 for k in self.exit_reasons}
         self.last_entry_timestamp = None
         self._grace_logged = False
@@ -386,13 +379,17 @@ class TradeManager:
         metrics.total_trades = self.total_trades
         metrics.win_trades = self.win_trades
         metrics.win_rate = (self.win_trades / self.total_trades * 100) if self.total_trades > 0 else 0.0
-        metrics.total_pnl = self.daily_pnl
-        metrics.ce_pnl = self.ce_pnl
-        metrics.pe_pnl = self.pe_pnl
+
+        # ✅ FIX #1 & #2: Use REALIZED P&L (already includes transaction costs)
+        metrics.total_pnl = self.realized_ce_pnl + self.realized_pe_pnl
+        metrics.ce_pnl = self.realized_ce_pnl
+        metrics.pe_pnl = self.realized_pe_pnl
+        metrics.transaction_costs = self.daily_transaction_costs
+
         metrics.rolled_positions = self.rolled_positions
         metrics.exit_reasons = self.exit_reasons.copy()
 
-        history = self.daily_pnl_history + [self.daily_pnl]
+        history = self.daily_pnl_history + [metrics.total_pnl]
         if history:
             cumulative = np.cumsum(history)
             running_max = np.maximum.accumulate(cumulative)
@@ -424,4 +421,6 @@ class TradeManager:
         for reason, count in self.exit_reasons.items():
             pct = (count / total) * 100
             print(f"  {reason.replace('_', ' ').title()}: {count} ({pct:.1f}%)")
+        print(f"{'-' * 60}")
+        print(f"Total Transaction Costs: ₹{self.total_transaction_costs:,.2f}")
         print(f"{'-' * 60}\n")

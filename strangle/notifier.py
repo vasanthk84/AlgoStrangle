@@ -1,5 +1,6 @@
 """
 Notification management for the Short Strangle Trading System
+FIXED: Added full date (YYYY-MM-DD) to all trade signal timestamps.
 """
 
 import logging
@@ -57,7 +58,8 @@ class NotificationManager:
             f"<b>Max Profit:</b> ₹{combined_premium * qty * 75:,.2f}\n"
             f"<b>Max Risk:</b> Unlimited (manage with stops)\n"
             f"\n"
-            f"⏰ Entry Time: {datetime.now().strftime('%H:%M:%S IST')}"
+            # --- FIX: Added full date ---
+            f"⏰ Entry Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}"
         )
 
         self.send_alert(message, "🟢 ENTRY")
@@ -92,7 +94,8 @@ class NotificationManager:
         if holding_time:
             message += f"<b>Holding Time:</b> {holding_time}\n"
 
-        message += f"\n⏰ Exit Time: {datetime.now().strftime('%H:%M:%S IST')}"
+        # --- FIX: Added full date ---
+        message += f"\n⏰ Exit Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}"
 
         self.send_alert(message, f"{emoji} EXIT")
 
@@ -122,6 +125,8 @@ class NotificationManager:
         if delta:
             message += f"<b>Current Delta:</b> {delta:.1f}\n"
 
+        # --- FIX: Added full date ---
+        message += f"\n⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}"
         message += f"\n⚠️ Closing position immediately..."
 
         self.send_alert(message, "🛑 STOP LOSS")
@@ -146,6 +151,8 @@ class NotificationManager:
             f"\n"
             f"<b>Total P&L:</b> ₹{pnl:+,.2f} ({pnl_pct:+.1f}%)\n"
             f"\n"
+            # --- FIX: Added full date ---
+            f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}\n"
             f"✅ Closing both legs..."
         )
 
@@ -164,7 +171,8 @@ class NotificationManager:
         message = (
             f"{emoji} <b>TIME SQUARE OFF</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"<b>Time:</b> 3:20 PM IST\n"
+            # --- FIX: Added full date ---
+            f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}\n"
             f"<b>Positions Closed:</b> {total_positions}\n"
             f"<b>Total P&L:</b> ₹{total_pnl:+,.2f}\n"
             f"\n"
