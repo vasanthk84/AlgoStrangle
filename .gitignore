@@ -17,3 +17,6 @@ build/
 .idea/
 .vscode/
 access_token.txt
+.env
+.env.local
+.env.*.local

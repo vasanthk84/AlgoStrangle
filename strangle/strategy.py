@@ -391,6 +391,16 @@ class ShortStrangleStrategy:
         if not self.entry_allowed_today:
             return
 
+        # 🆕 Check risk manager state
+        if self.trade_manager.risk_manager.daily_stop_triggered:
+            logging.warning("Entry blocked: Daily stop triggered")
+            self.entry_allowed_today = False
+            return
+        
+        if self.trade_manager.risk_manager.is_in_cooldown():
+            logging.info("Entry blocked: Risk adjustment cooldown active")
+            return
+
         regime = self.get_trend_bias(Config.TREND_DETECTION_PERIOD)
         logging.info(
             f"REGIME: {regime.value} | VIX: {self.market_data.india_vix:.1f} | "
@@ -410,11 +420,20 @@ class ShortStrangleStrategy:
             self.strategy_usage['skipped'] += 1
             return
 
+        # 🆕 Get regime adjustments from risk manager
+        adjustments = self.trade_manager.risk_manager.regime_adjustments(
+            vix=self.market_data.india_vix,
+            iv_rank=self.market_data.iv_rank
+        )
+
         estimated_premium = 50
         qty_lots = self.calculate_position_size(estimated_premium, dte)
+        
+        # 🆕 Apply regime-based position sizing
+        qty_lots = int(qty_lots * adjustments['position_size_multiplier'])
 
         if qty_lots <= 0:
-            logging.warning("Position size is 0 (VIX block)")
+            logging.warning("Position size is 0 (VIX/regime block)")
             self.strategy_usage['skipped'] += 1
             return
 

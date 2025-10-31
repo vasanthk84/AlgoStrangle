@@ -227,3 +227,85 @@ class NotificationManager:
         )
 
         self.send_alert(message, "📊 SUMMARY")
+    
+    # ═══════════════════════════════════════════════════════════════
+    # 🆕 RISK MANAGEMENT NOTIFICATIONS
+    # ═══════════════════════════════════════════════════════════════
+    
+    def notify_daily_stop(self, daily_pnl: float, threshold: float):
+        """Notification when daily stop loss is triggered"""
+        message = (
+            f"🛑 <b>DAILY STOP LOSS TRIGGERED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Daily P&L:</b> ₹{daily_pnl:+,.2f}\n"
+            f"<b>Loss Threshold:</b> ₹{threshold:,.2f}\n"
+            f"\n"
+            f"⚠️ <b>ACTIONS TAKEN:</b>\n"
+            f"  • All positions closed\n"
+            f"  • New entries blocked for today\n"
+            f"  • System locked until next trading day\n"
+            f"\n"
+            f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}"
+        )
+        
+        self.send_alert(message, "🛑 DAILY STOP")
+        
+        # Console alert
+        print(f"\n{Fore.RED}{'=' * 60}{Style.RESET_ALL}")
+        print(f"{Fore.RED}🛑 DAILY STOP LOSS TRIGGERED{Style.RESET_ALL}")
+        print(f"{Fore.RED}P&L: ₹{daily_pnl:+,.2f} | Threshold: ₹{threshold:,.2f}{Style.RESET_ALL}")
+        print(f"{Fore.RED}All positions closed, entries blocked{Style.RESET_ALL}")
+        print(f"{Fore.RED}{'=' * 60}{Style.RESET_ALL}\n")
+    
+    def notify_vix_shock(self, prev_vix: float, current_vix: float, action_summary: str):
+        """Notification when VIX shock is detected"""
+        vix_change = current_vix - prev_vix
+        vix_change_pct = (vix_change / prev_vix) * 100 if prev_vix > 0 else 0
+        
+        message = (
+            f"⚡ <b>VIX SHOCK DETECTED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Previous VIX:</b> {prev_vix:.2f}\n"
+            f"<b>Current VIX:</b> {current_vix:.2f}\n"
+            f"<b>Change:</b> {vix_change:+.2f} pts ({vix_change_pct:+.1f}%)\n"
+            f"\n"
+            f"<b>Risk Actions:</b>\n"
+            f"{action_summary}\n"
+            f"\n"
+            f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}"
+        )
+        
+        self.send_alert(message, "⚡ VIX SHOCK")
+        
+        # Console alert
+        print(f"\n{Fore.YELLOW}{'=' * 60}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}⚡ VIX SHOCK DETECTED{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}VIX: {prev_vix:.2f} → {current_vix:.2f} ({vix_change:+.2f}){Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}{action_summary}{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}{'=' * 60}{Style.RESET_ALL}\n")
+    
+    def notify_delta_hedge(self, net_delta_before: float, net_delta_after: float, 
+                          instruments: str):
+        """Notification when delta hedge is placed"""
+        delta_change = net_delta_after - net_delta_before
+        
+        message = (
+            f"🛡️ <b>DELTA HEDGE EXECUTED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Portfolio Delta Before:</b> {net_delta_before:+.1f}\n"
+            f"<b>Portfolio Delta After:</b> {net_delta_after:+.1f}\n"
+            f"<b>Delta Change:</b> {delta_change:+.1f}\n"
+            f"\n"
+            f"<b>Hedge Instruments:</b>\n"
+            f"{instruments}\n"
+            f"\n"
+            f"⏰ Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S IST')}"
+        )
+        
+        self.send_alert(message, "🛡️ HEDGE")
+        
+        # Console notification
+        print(f"\n{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}🛡️ DELTA HEDGE EXECUTED{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}Delta: {net_delta_before:+.1f} → {net_delta_after:+.1f}{Style.RESET_ALL}")
+        print(f"{Fore.CYAN}{'=' * 60}{Style.RESET_ALL}\n")
