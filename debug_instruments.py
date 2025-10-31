@@ -3,15 +3,20 @@ debug_instruments.py
 Check what instruments are available for a specific date
 """
 
+import os
 from kiteconnect import KiteConnect
 from historical_data_manager import HistoricalDataManager
 from datetime import datetime, date
 import pandas as pd
 from colorama import Fore, Style
 
-# Your API credentials
-API_KEY = "qdss2yswc2iuen3j"
-API_SECRET = "q9cfy774cgt8z0exp0tlat4rntj7huqs"
+# Load API credentials from environment
+API_KEY = os.getenv('KITE_API_KEY', '')
+API_SECRET = os.getenv('KITE_API_SECRET', '')
+
+if not API_KEY or not API_SECRET:
+    print(f"{Fore.YELLOW}Warning: KITE_API_KEY or KITE_API_SECRET not set{Style.RESET_ALL}")
+    print("Set environment variables before running this script")
 
 def authenticate_kite():
     """Authenticate with Kite"""

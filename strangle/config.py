@@ -27,9 +27,17 @@ class Config:
     ENTRY_LOG_FILE = os.path.join(LOG_DIR_CSV, f"entry_decisions_{LOG_TIMESTAMP}.csv")
     AUDIT_FILE = os.path.join(LOG_DIR_AUDIT, f"audit_trail_{LOG_TIMESTAMP}.txt")
 
-    # API Configuration
-    API_KEY = "qdss2yswc2iuen3j"
-    API_SECRET = "q9cfy774cgt8z0exp0tlat4rntj7huqs"
+    # API Configuration - Load from environment
+    API_KEY = os.getenv('KITE_API_KEY', '')
+    API_SECRET = os.getenv('KITE_API_SECRET', '')
+    
+    # Warn if using defaults
+    if not API_KEY or not API_SECRET:
+        import logging
+        logging.warning(
+            "KITE_API_KEY or KITE_API_SECRET not set in environment. "
+            "Set these environment variables before running in live mode."
+        )
 
     # Trading Mode
     PAPER_TRADING = True
@@ -153,9 +161,17 @@ class Config:
     TICK_SKIP_INTERVAL = 5
     DRY_RUN_MODE = True
 
-    # Notifications
-    TELEGRAM_BOT_TOKEN = "7668822476:AAEeSzWdt7DgzOs3Fsbz5_oZpPL8xoUpLH8"
-    TELEGRAM_CHAT_ID = "7745188241"
+    # Notifications - Load from environment
+    TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '')
+    TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '')
+    
+    # Warn if using defaults
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        import logging
+        logging.warning(
+            "TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set in environment. "
+            "Telegram notifications will be disabled."
+        )
     ACCESS_TOKEN_FILE = "access_token.txt"
 
     # Expiry
@@ -164,3 +180,37 @@ class Config:
     # Legacy Params (kept for backward compatibility)
     OTM_DISTANCE_NORMAL = 400
     OTM_DISTANCE_HIGH_VIX = 450
+
+    # ═══════════════════════════════════════════════════════════════
+    # PORTFOLIO-LEVEL RISK MANAGEMENT
+    # ═══════════════════════════════════════════════════════════════
+    
+    # Daily loss kill-switch
+    DAILY_MAX_LOSS_PCT = 0.015  # 1.5% of capital
+    
+    # Delta bands (portfolio net delta triggers)
+    DELTA_BAND_BASE = 15.0  # Base delta band in deltas
+    DELTA_BAND_TIGHT_VIX = {
+        15: 15,   # VIX < 15: band = 15 deltas
+        20: 12,   # VIX < 20: band = 12 deltas
+        30: 10,   # VIX < 30: band = 10 deltas
+        999: 8    # VIX >= 30: band = 8 deltas
+    }
+    
+    # VIX shock detection
+    VIX_SHOCK_ABS = 4.0         # Absolute VIX change threshold (points)
+    VIX_SHOCK_ROC_PCT = 15.0    # Rate of change threshold (%)
+    
+    # VIX shock response
+    SHORT_VEGA_REDUCTION_PCT = 0.4  # Reduce short vega by 40% on shock
+    
+    # Adjustment cooldown
+    ADJUSTMENT_COOLDOWN_SEC = 900  # 15 minutes between adjustments
+    
+    # Hedge preferences
+    HEDGE_PREFERRED = "OPTIONS"  # "OPTIONS" or "FUT"
+    HEDGE_DELTA_OFFSET = 35  # Target delta for hedge options (30-40 range)
+    
+    # Wing protection (for converting to defined risk)
+    WING_SPREAD_MULTIPLIER = 2.0  # Wings at 2x current spread width
+    WING_MAX_COST_PER_LOT = 1000  # Max ₹1000 per lot for wings

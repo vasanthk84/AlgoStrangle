@@ -52,7 +52,8 @@ class Trade:
     def __init__(self, trade_id: str, symbol: str, qty: int, direction: Direction,
                  price: float, timestamp: datetime, option_type: str,
                  lot_size: int = 75, strike_price: float = None,
-                 expiry: datetime = None, spot_at_entry: float = 0.0):
+                 expiry: datetime = None, spot_at_entry: float = 0.0,
+                 trade_type: str = "BASE"):
         self.trade_id = trade_id
         self.symbol = symbol
         self.qty = qty  # Number of lots
@@ -71,6 +72,7 @@ class Trade:
         self.spot_at_entry = spot_at_entry
         self.rolled_from = None
         self.hedge_protection: Optional[str] = None
+        self.trade_type = trade_type  # "BASE", "HEDGE", or "WING"
 
     def _extract_strike_from_symbol(self, symbol: str) -> float:
         """Extract strike from symbol"""
