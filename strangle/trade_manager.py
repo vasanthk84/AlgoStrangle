@@ -15,6 +15,7 @@ from .models import MarketData, Trade, Direction
 from .broker import BrokerInterface
 from .db import DatabaseManager
 from .notifier import NotificationManager
+from .risk_policy import PortfolioRiskManager, RiskAction
 
 
 class TradeManager:
@@ -57,6 +58,10 @@ class TradeManager:
         self.last_entry_timestamp: Optional[datetime] = None
         self.entry_grace_period_minutes = 5
         self._grace_logged = False
+
+        # ✅ NEW: Portfolio-level risk manager
+        self.risk_manager = PortfolioRiskManager(Config)
+        self.system_locked = False  # Lock system when daily stop hit
 
     def add_trade(self, trade: Trade):
         """Add a new trade"""
@@ -149,6 +154,12 @@ class TradeManager:
         self.ce_pnl = self.realized_ce_pnl + self.unrealized_ce_pnl
         self.pe_pnl = self.realized_pe_pnl + self.unrealized_pe_pnl
         self.daily_pnl = self.ce_pnl + self.pe_pnl
+
+        # ✅ NEW: Update risk manager state
+        self.risk_manager.update_state(market_data, self.active_trades)
+        
+        # ✅ NEW: Check risk conditions
+        self._check_portfolio_risk(market_data)
 
     def calculate_transaction_cost(self, trade: Trade) -> float:
         """
@@ -371,6 +382,10 @@ class TradeManager:
         self.exit_reasons = {k: 0 for k in self.exit_reasons}
         self.last_entry_timestamp = None
         self._grace_logged = False
+        
+        # ✅ NEW: Reset risk manager daily state
+        self.risk_manager.reset_daily()
+        self.system_locked = False
 
     def get_performance_metrics(self) -> Any:
         class Metrics:
@@ -424,3 +439,261 @@ class TradeManager:
         print(f"{'-' * 60}")
         print(f"Total Transaction Costs: ₹{self.total_transaction_costs:,.2f}")
         print(f"{'-' * 60}\n")
+
+    # ═══════════════════════════════════════════════════════════════
+    # NEW: Portfolio Risk Management Methods
+    # ═══════════════════════════════════════════════════════════════
+
+    def _check_portfolio_risk(self, market_data: MarketData):
+        """Check portfolio-level risk conditions and take actions"""
+        if self.system_locked:
+            return  # System locked after daily stop
+        
+        if self.risk_manager.is_in_cooldown():
+            return  # In cooldown period
+        
+        # 1. Check daily loss kill-switch (highest priority)
+        response = self.risk_manager.check_daily_stop(self.daily_pnl)
+        if response and response.action == RiskAction.DAILY_STOP_CLOSE_ALL:
+            self._handle_daily_stop(response, market_data.timestamp)
+            return
+        
+        # 2. Check VIX shock
+        response = self.risk_manager.check_vix_shock(market_data.india_vix)
+        if response and response.action == RiskAction.VIX_SHOCK_REDUCE_VEGA:
+            self._handle_vix_shock(response, market_data)
+            return
+        
+        # 3. Check delta bands (hedge if needed)
+        response = self.risk_manager.check_delta_bands(market_data.india_vix)
+        if response and response.action in [
+            RiskAction.DELTA_HEDGE_BUY_CE, 
+            RiskAction.DELTA_HEDGE_BUY_PE
+        ]:
+            self._handle_delta_hedge(response, market_data)
+            return
+
+    def _handle_daily_stop(self, response, exit_timestamp: datetime):
+        """Handle daily loss kill-switch trigger"""
+        logging.critical(f"DAILY STOP TRIGGERED: {response.reason}")
+        
+        # Send notification
+        self.notifier.notify_daily_stop(
+            daily_pnl=response.parameters['daily_pnl'],
+            threshold=response.parameters['threshold']
+        )
+        
+        # Close all positions
+        self.close_all_positions("DAILY_STOP", exit_timestamp)
+        
+        # Lock system for the day
+        self.system_locked = True
+        logging.critical("System locked - no new entries allowed today")
+
+    def _handle_vix_shock(self, response, market_data: MarketData):
+        """Handle VIX shock - reduce short vega exposure"""
+        logging.warning(f"VIX SHOCK DETECTED: {response.reason}")
+        
+        params = response.parameters
+        reduction_pct = params['reduction_pct']
+        
+        # Calculate target vega
+        current_vega = self.risk_manager.portfolio_state.net_vega
+        target_vega = self.risk_manager.get_vega_reduction_target(current_vega)
+        
+        # Close a fraction of short positions to reduce vega
+        closed_count = self._reduce_short_vega(reduction_pct, market_data.timestamp)
+        
+        action_summary = (
+            f"• Reduced short vega by {reduction_pct:.0%}\n"
+            f"• Closed {closed_count} positions\n"
+            f"• Net vega: {current_vega:.2f} → target: {target_vega:.2f}"
+        )
+        
+        # Send notification
+        self.notifier.notify_vix_shock(
+            prev_vix=params['prev_vix'],
+            current_vix=params['current_vix'],
+            action_summary=action_summary
+        )
+        
+        # Set cooldown
+        self.risk_manager.set_cooldown()
+        logging.info(f"VIX shock handled. {closed_count} positions closed.")
+
+    def _reduce_short_vega(self, reduction_pct: float, exit_timestamp: datetime) -> int:
+        """
+        Reduce short vega exposure by closing a fraction of short positions
+        
+        Returns:
+            Number of positions closed
+        """
+        # Get all short positions sorted by vega (most negative first)
+        short_trades = [
+            (tid, trade) for tid, trade in self.active_trades.items()
+            if trade.direction == Direction.SELL and trade.greeks is not None
+        ]
+        
+        if not short_trades:
+            return 0
+        
+        # Sort by vega (most negative vega first = highest short vega)
+        short_trades.sort(key=lambda x: x[1].greeks.vega)
+        
+        # Calculate how many to close (proportionally)
+        num_to_close = max(1, int(len(short_trades) * reduction_pct))
+        
+        closed_count = 0
+        for tid, trade in short_trades[:num_to_close]:
+            logging.warning(
+                f"Closing {trade.symbol} to reduce vega (vega={trade.greeks.vega:.2f})"
+            )
+            self.close_single_leg(tid, exit_timestamp, "VIX_SHOCK_REDUCTION")
+            closed_count += 1
+        
+        return closed_count
+
+    def _handle_delta_hedge(self, response, market_data: MarketData):
+        """Handle delta hedging - buy options to neutralize delta"""
+        logging.warning(f"DELTA HEDGE TRIGGERED: {response.reason}")
+        
+        params = response.parameters
+        net_delta_before = params['net_delta']
+        target_delta = params['target_delta']
+        
+        # Determine hedge direction
+        if response.action == RiskAction.DELTA_HEDGE_BUY_CE:
+            # Portfolio too short delta -> buy calls
+            hedge_option_type = "CE"
+            delta_sign = 1
+        else:
+            # Portfolio too long delta -> buy puts
+            hedge_option_type = "PE"
+            delta_sign = -1
+        
+        # Find hedge instrument (simplified - use ATM or slightly OTM)
+        hedge_strike = self._find_hedge_strike(
+            market_data.nifty_spot,
+            hedge_option_type,
+            Config.HEDGE_DELTA_OFFSET
+        )
+        
+        if not hedge_strike:
+            logging.error("Could not find suitable hedge strike")
+            return
+        
+        # Calculate hedge size (simplified)
+        target_delta_change = target_delta - net_delta_before
+        hedge_lots = max(1, int(abs(target_delta_change) / (Config.HEDGE_DELTA_OFFSET * 75)))
+        
+        # Find hedge symbol and price
+        try:
+            expiry = self._get_nearest_expiry(market_data.timestamp)
+            
+            if self.broker.backtest_data is not None:
+                from .utils import Utils
+                hedge_symbol = Utils.prepare_option_symbol(hedge_strike, hedge_option_type, expiry)
+                hedge_price = self.broker.get_quote(hedge_symbol)
+            else:
+                instrument = self.broker.find_live_option_symbol(
+                    hedge_strike, hedge_option_type, expiry
+                )
+                if not instrument:
+                    logging.error("Hedge instrument not found")
+                    return
+                hedge_symbol = f"NFO:{instrument['tradingsymbol']}"
+                hedge_price = self.broker.get_quote(hedge_symbol)
+            
+            if hedge_price <= 0 or hedge_price > 1000:
+                logging.error(f"Invalid hedge price: {hedge_price}")
+                return
+            
+            # Place hedge order (BUY direction)
+            hedge_order_id = self.broker.place_order(
+                hedge_symbol, hedge_lots, Direction.BUY, hedge_price
+            )
+            
+            if not hedge_order_id:
+                logging.error("Hedge order placement failed")
+                return
+            
+            # Create hedge trade
+            hedge_trade = Trade(
+                trade_id=hedge_order_id,
+                symbol=hedge_symbol,
+                qty=hedge_lots,
+                direction=Direction.BUY,
+                price=hedge_price,
+                timestamp=market_data.timestamp,
+                option_type=hedge_option_type,
+                strike_price=hedge_strike,
+                expiry=expiry,
+                spot_at_entry=market_data.nifty_spot,
+                trade_type="HEDGE"  # Mark as hedge
+            )
+            
+            self.add_trade(hedge_trade)
+            
+            # Calculate new net delta (approximate)
+            hedge_delta = Config.HEDGE_DELTA_OFFSET * delta_sign * hedge_lots * 75
+            net_delta_after = net_delta_before + hedge_delta
+            
+            # Send notification
+            instruments_desc = (
+                f"BUY {hedge_lots} lots {hedge_option_type} {hedge_strike} @ ₹{hedge_price:.2f}"
+            )
+            self.notifier.notify_delta_hedge(
+                net_delta_before=net_delta_before,
+                net_delta_after=net_delta_after,
+                instruments=instruments_desc
+            )
+            
+            # Set cooldown
+            self.risk_manager.set_cooldown()
+            logging.info(f"Delta hedge placed: {instruments_desc}")
+            
+        except Exception as e:
+            logging.error(f"Error placing delta hedge: {e}", exc_info=True)
+
+    def _find_hedge_strike(self, spot: float, option_type: str, 
+                          target_delta: float) -> Optional[float]:
+        """
+        Find strike for hedge option with target delta
+        
+        Simplified: Use strike slightly OTM based on target delta
+        """
+        from .utils import Utils
+        
+        if option_type == "CE":
+            # For calls, go OTM (above spot)
+            offset = int(target_delta * 10)  # Rough approximation
+            strike = Utils.round_strike(spot + offset)
+        else:
+            # For puts, go OTM (below spot)
+            offset = int(target_delta * 10)
+            strike = Utils.round_strike(spot - offset)
+        
+        return strike
+
+    def _get_nearest_expiry(self, current_time: datetime) -> date:
+        """Get nearest weekly expiry"""
+        current = current_time.date()
+        days_to_add = (Config.WEEKLY_EXPIRY_DAY - current.weekday()) % 7
+        
+        if days_to_add == 0:
+            days_to_add = 7
+        
+        if days_to_add < Config.MIN_DTE_TO_HOLD:
+            days_to_add += 7
+        
+        expiry = current + timedelta(days=days_to_add)
+        
+        from .utils import Utils
+        while Utils.is_holiday(expiry):
+            expiry += timedelta(days=1)
+        
+        return expiry
+
+    def is_entry_allowed(self) -> bool:
+        """Check if new entries are allowed (not locked by risk manager)"""
+        return not self.system_locked
